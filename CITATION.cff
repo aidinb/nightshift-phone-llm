@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this simulator or benchmark kit, please cite the paper."
+title: "NightShift: Batch LLM Inference on Charging Smartphones"
+authors:
+  - family-names: Bazarchi
+    given-names: Aidin
+type: software
+license: MIT

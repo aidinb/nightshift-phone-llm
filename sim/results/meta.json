@@ -1,0 +1,75 @@
+{
+ "seeds": [
+  0,
+  1,
+  2,
+  3,
+  4
+ ],
+ "n_phones": 1000,
+ "config_defaults": {
+  "n_phones": 2000,
+  "seed": 0,
+  "history_days": 7,
+  "tick_s": 10.0,
+  "n_layers": 80,
+  "layer_gb": 0.5,
+  "kv_bytes_per_token_layer": 4096,
+  "block_layers": 5,
+  "batch_seqs": 32,
+  "prompt_tokens": 512,
+  "output_tokens": 256,
+  "prefill_efficiency": 8.0,
+  "batch_alpha": 0.1,
+  "hop_latency_s": 0.06,
+  "flash_load_gbps": 8.0,
+  "dl_median_mbps": 50.0,
+  "dl_sigma": 0.6,
+  "phone_classes": [
+   [
+    6.0,
+    0.1,
+    0.45,
+    30.0
+   ],
+   [
+    8.0,
+    0.4,
+    0.45,
+    18.0
+   ],
+   [
+    12.0,
+    0.35,
+    0.45,
+    12.0
+   ],
+   [
+    16.0,
+    0.15,
+    0.45,
+    10.0
+   ]
+  ],
+  "speed_sigma": 0.2,
+  "power_active_w": 4.0,
+  "power_wait_w": 1.0,
+  "night_prob": 0.85,
+  "night_start_mean_h": 23.0,
+  "night_start_sd_h": 1.0,
+  "night_dur_mean_h": 7.0,
+  "night_dur_sd_h": 1.5,
+  "day_sessions_per_day": 1.5,
+  "day_dur_median_min": 35.0,
+  "day_dur_sigma": 0.8,
+  "day_wifi_prob": 0.6,
+  "policy": "nightshift",
+  "placement": "sticky",
+  "recovery": "replay",
+  "consolidate": true,
+  "standbys": 0,
+  "sticky_fallback_s": 300.0,
+  "eval_start_h": 12.0,
+  "eval_hours": 24.0
+ }
+}

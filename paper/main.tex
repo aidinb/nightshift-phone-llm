@@ -1,0 +1,420 @@
+% NightShift: batch LLM inference on charging smartphones.
+% Build:  latexmk -pdf main.tex          (anonymous review copy, default)
+%         latexmk -pdf -jobname=main-arxiv -pdflatex='pdflatex %O "\def\arxiv{1}\input{%S}"' main.tex
+\ifdefined\arxiv
+  \documentclass[sigconf,nonacm]{acmart}
+\else
+  \documentclass[sigconf,review,anonymous]{acmart}
+\fi
+\settopmatter{printacmref=false}
+\setcopyright{none}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\usepackage{booktabs}
+\input{numbers}
+
+% Placeholders that only real measurements can fill are printed in this colour
+% and listed in the handoff. A submission must contain none of them.
+\newcommand{\TODO}[1]{\textcolor{red}{[#1]}}
+
+\begin{document}
+
+\title{NightShift: Batch LLM Inference on Charging Smartphones}
+
+\author{Aidin Bazarchi}
+\affiliation{%
+  \institution{Independent Researcher}
+  \country{}}
+
+\begin{abstract}
+Billions of smartphones spend every night plugged in, on Wi-Fi, and idle.
+We ask whether that pool can run inference for a large language model too big
+for any single phone, and what it would take. A 70B-parameter model at 4-bit
+needs about 40\,GB, so one copy is a 16-stage pipeline of phones that leave
+whenever their owners unplug them. Using a simulator whose phone and network
+parameters are explicit, replaceable assumptions, we find three things.
+First, the pool is a night-time resource: \NightSharePct\% of a day's tokens
+are produced between 22:00 and 08:00. Second, per-token latency is seconds
+(\LatWAN\,s at 60\,ms per hop), so the useful workload is batch work, not chat.
+Third, the dominant cost of churn is not lost computation but moving model
+shards: a Petals-style design re-downloads \GBReplay\,GB of weights per million
+tokens. NightShift fixes each phone's shard for good, forms pipelines from
+phones expected to leave together, and consolidates broken pipelines at dawn.
+With 1,000 phones it cuts shard traffic \GBRatio$\times$ at equal or slightly
+higher throughput; its advantage grows with the pool, to \PoolLargeGBRatio$\times$
+less traffic and \PoolLargeGainPct\% throughput at 4,000 phones. Keeping warm
+standbys, the obvious fix, cuts throughput by \StandbyDropPct\%. We release the simulator and a benchmark kit so the
+assumed parameters can be replaced with measurements.
+\end{abstract}
+
+\maketitle
+
+\section{Introduction}
+
+Volunteer computing has a long record: BOINC and SETI@home turned idle desktops
+into a scientific computer~\cite{boinc}, and Google's federated learning system
+trains models on phones only while they are ``idle, charging and on an
+unmetered network''~\cite{bonawitz2019}. Large language models (LLMs) are the
+largest compute consumer of the decade, which invites the question: could the
+idle phones of the world run them?
+
+The question has an easy wrong answer in each direction. ``Yes, a billion
+phones beat any data centre'' ignores that generation is sequential and that a
+large model does not fit on a phone. ``No, phones are too small'' ignores that
+the same was said of volunteer desktops, and that systems such as
+Petals~\cite{petals-acl,petals-neurips} already serve 100B-class models from
+pipelines of volunteer GPUs over the internet. The interesting question is
+quantitative: \emph{for which workloads, at what throughput and cost, and
+which design choices matter?}
+
+This paper makes three contributions.
+\begin{enumerate}
+\item A first-principles analysis (\S\ref{sec:physics}) of what a phone pool
+can and cannot do: it suits throughput-oriented batch jobs, not interactive
+chat, and it pays more for memory traffic and energy per token than a GPU.
+\item A churn-aware simulator (\S\ref{sec:method}) driven by a diurnal model of
+when phones are charging and on Wi-Fi. Every phone, network and user parameter
+is explicit and can be replaced by a measurement; we release a benchmark kit
+that produces those measurements on Android phones.
+\item NightShift (\S\ref{sec:design}), a placement and recovery design built on
+one observation from the simulator: once phones come and go, moving model
+shards costs more than redoing computation. Sticky shard ownership,
+lifetime-grouped pipelines and dawn consolidation cut shard downloads
+\GBRatioMin--\GBRatioMax$\times$ across every setting we tried, and the
+gain grows with pool size. Dedicated standbys, the standard remedy for
+preemption~\cite{bamboo}, make things worse.
+\end{enumerate}
+
+We are explicit about what is and is not measured. All results here come from
+simulation with stated assumptions (Table~\ref{tab:params}); \S\ref{sec:validation}
+describes the measurements that will replace them.
+
+\section{The physics of a phone pool}
+\label{sec:physics}
+
+\paragraph{Memory.} A 70B model quantised to about 4 bits per weight occupies
+roughly 40\,GB; we model 80 layers of 0.5\,GB. An Android app running in the
+background can rarely hold more than a fraction of a phone's RAM; we assume
+45\%, so an 8\,GB phone offers 3.6\,GB. With the key-value (KV) cache for a
+batch of 32 sequences of 768 tokens, a five-layer block needs 3.0\,GB, so a
+model copy is a pipeline of 16 phones, and phones with 6\,GB of RAM cannot take
+part at all (\EligiblePct\% of our pool is eligible).
+
+\paragraph{Latency.} Generating one token visits all 16 stages in order. At
+roughly 15\,ms per layer on a mid-range phone and 60\,ms per wide-area hop,
+a token takes about 1.2\,s of compute plus 1.0\,s of network, i.e.\ around two
+seconds. Neither speculative decoding~\cite{specdec} nor faster phones change
+the order of magnitude while the hops remain. A conversational assistant is
+therefore out of reach over the internet; a household network
+(5\,ms hops) brings latency to \LatLAN\,s.
+
+\paragraph{Throughput.} Latency need not limit throughput. With many sequences
+in flight, a pipeline keeps every stage busy, as in GPipe-style
+micro-batching~\cite{gpipe} and continuous batching servers~\cite{orca,vllm}.
+Batch workloads such as offline evaluation, synthetic data generation,
+document summarisation or embedding a corpus tolerate hours of latency and are
+a large share of LLM demand, the same regime FlexGen targets on a single
+GPU~\cite{flexgen}.
+
+\paragraph{Memory traffic and energy.} The price is efficiency. A data-centre
+GPU serving a batch of 128 reads each weight once per 128 tokens, about
+0.3\,GB of weight traffic per token for a 70B model. A phone pipeline with 32
+sequences over 16 stages processes micro-batches of two, so it reads about
+20\,GB per token, roughly 60$\times$ more. At an assumed 4\,W per active phone and
+1\,W while waiting, the simulated pool spends about \JNS\,J per token; we have
+not measured a GPU server on the same workload, and that comparison is part of
+the validation plan. The phone pool's argument is therefore not
+efficiency but \emph{marginal cost}: the hardware is already bought, already
+powered at night and otherwise idle. Whether that argument survives battery
+wear and the owner's electricity bill is a question for measurement and
+incentive design, which we leave open (\S\ref{sec:limits}).
+
+\section{Related work}
+
+\paragraph{Volunteer and federated computing.} BOINC~\cite{boinc} established
+redundant execution and work units for untrusted volunteers but ran independent
+jobs. Federated learning~\cite{fedavg,bonawitz2019} runs on phones at
+production scale and established the eligibility rule we adopt (charging,
+Wi-Fi, idle); each phone trains a full small model, and nothing is split across
+devices. Device availability in federated learning has been measured at large
+scale~\cite{yang2021heterogeneity,fedscale}; those traces are natural inputs
+to our simulator.
+
+\paragraph{LLMs over unreliable consumer hardware.}
+Petals~\cite{petals-acl,petals-neurips} serves large models from pipelines of
+volunteer GPUs and recovers from departures by routing around them and
+replaying the lost stage's cache; it is the baseline we call \emph{replay}.
+SWARM~\cite{swarm}, Learn\-ing\-@home~\cite{learningathome} and
+DiLoCo~\cite{diloco} train over unreliable or poorly connected nodes.
+SpotServe~\cite{spotserve} serves LLMs on preemptible cloud instances and
+Bamboo~\cite{bamboo} adds redundancy to survive preemption. Those nodes are
+GPUs with tens of gigabytes and minutes of warning; ours are phones with a few
+gigabytes and no warning.
+
+\paragraph{Splitting models across nearby devices.}
+LinguaLinked~\cite{lingualinked} runs one LLM across several Android phones,
+Galaxy~\cite{galaxy} and EdgeShard~\cite{edgeshard} split transformers across
+edge devices, and exo~\cite{exo} does so for a household's laptops and phones;
+earlier, MoDNN~\cite{modnn} and DeepThings~\cite{deepthings} split CNNs. These
+assume a small, stable set of devices. We study the opposite regime: a large
+pool in which membership changes all the time.
+
+\paragraph{Single-phone inference.} LLM in a flash~\cite{llminaflash},
+PowerInfer-2~\cite{powerinfer2} and runtimes such as llama.cpp~\cite{llamacpp}
+make single phones faster, and MobileLLM~\cite{mobilellm} designs models that
+fit one phone. These are complementary: a faster phone shortens every stage,
+and a model that fits one phone needs no pipeline at all, which is the right
+choice whenever such a model is good enough.
+
+\section{NightShift}
+\label{sec:design}
+
+A coordinator holds a job queue and a fixed \emph{shard catalogue}: the model
+cut into 16 blocks of 5 layers. A phone joins the pool when it is charging, on
+Wi-Fi and idle, and leaves without warning. A pipeline is one phone per block;
+it advances a batch of 32 sequences in lock step. When a member leaves, its
+sequences pause until the stage is refilled. NightShift has three parts.
+
+\paragraph{Sticky shards.} Every phone is assigned a \emph{home block} once
+and keeps it in flash storage indefinitely. A pipeline stage is only ever
+filled by a phone whose home block matches; loading from flash takes seconds,
+whereas downloading 2.5\,GB over a residential link takes minutes and costs the
+owner data. If no matching phone is idle, the vacant stage waits up to five
+minutes before falling back to a phone that must download the block.
+Because the catalogue is fixed, the coordinator only needs to keep the 16
+home-block populations balanced.
+
+\paragraph{Lifetime-grouped pipelines.} A pipeline lives only as long as its
+shortest-lived member. The coordinator predicts when each phone's charging
+session ends, from that user's history of sessions starting at a similar time
+of day, sorts each block's idle phones by predicted end, and builds the $i$-th
+pipeline from the $i$-th phone of every block. Phones expected to stay until
+morning end up together, and short daytime sessions are grouped with each
+other instead of cutting long-lived pipelines short.
+
+\paragraph{Dawn consolidation.} In the morning, phones leave faster than idle
+phones arrive, leaving many pipelines with one or two vacant stages that
+nobody can fill. Waiting wastes every phone in those pipelines. When at least
+two pipelines are broken, NightShift dissolves the most damaged one (most
+vacancies, then least progress) and lends its phones, which already hold blocks
+of the same catalogue, to the others. A pool that shrinks keeps as many
+\emph{complete} pipelines as it can afford.
+
+\paragraph{Recovery.} A replacement phone recomputes the KV cache of its block
+for the tokens processed so far (prefill is cheaper per token than decode), as
+in Petals; we compare this with restarting the batch.
+
+\paragraph{What we chose not to do.} Keeping $k$ warm standbys per stage turns a
+failure into a fast swap but takes $k\times16$ phones out of service per
+pipeline. We evaluate it as a baseline.
+
+\section{Simulation methodology}
+\label{sec:method}
+
+\begin{table}[t]
+\caption{Simulator parameters. All are assumptions until replaced by
+measurements from the benchmark kit (\S\ref{sec:validation}).}
+\label{tab:params}
+\small
+\begin{tabular}{@{}p{0.25\columnwidth}p{0.71\columnwidth}@{}}
+\toprule
+Model & 80 layers $\times$ 0.5\,GB, KV 4\,KiB/token/layer\\
+Workload & batches of 32 seq., 512 prompt + 256 output tokens\\
+Prefill cost & 1/8 of a decode token\\
+Phones & RAM, share of pool, ms per layer: 6\,GB, 10\%, 30; 8\,GB, 40\%, 18; 12\,GB, 35\%, 12; 16\,GB, 15\%, 10 (log-normal spread $\sigma{=}0.2$)\\
+Usable RAM & 45\% of physical\\
+Network & 60\,ms per hop; downlink median 50\,Mbit/s\\
+Flash read & 1\,GB/s\\
+Power & 4\,W computing, 1\,W waiting\\
+Night charging & 85\% of nights, start 23:00$\pm$1\,h, 7$\pm$1.5\,h\\
+Day charging & 1.5 sessions/day, median 35\,min, 60\% on Wi-Fi\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The simulator advances in 10-second ticks over 24 hours from noon, after seven
+days of history used only to train the session-end predictor. Each phone has a
+RAM class, a per-layer decode time and a downlink speed drawn from
+Table~\ref{tab:params}, and a sequence of charging sessions drawn from the
+diurnal model, or read from a real trace. A pipeline's per-token latency is the
+sum of its stage times plus one hop per stage; its throughput is limited by
+$\max(\text{latency}, 16\cdot\max_i \text{stage}_i)$ per round, since 16
+micro-batches are in flight. A micro-batch of $b$ tokens costs
+$1+0.1(b-1)$ times a single token. We assume steady state: every phone already
+holds one block in flash from an earlier night, so day-one onboarding traffic
+is excluded for all policies alike. Results are means over \Seeds{} seeds with
+\NPhones{} phones; error bars show one standard deviation.
+
+We compare seven policies that differ only in placement and recovery:
+\emph{restart} and \emph{replay} (random placement, Petals-style replay),
+\emph{standby} (replay plus one standby per stage), and the three NightShift
+components alone (\emph{lifetime}, \emph{consolidate}, \emph{sticky}) and
+together (\emph{NightShift}). The upper bound places every available,
+eligible phone in a complete pipeline instantly.
+
+\section{Results}
+\label{sec:results}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/timeline}
+\caption{One simulated day. Top: phones available. Bottom: pipelines running
+and an upper bound that assumes instant, perfect placement.}
+\label{fig:timeline}
+\end{figure}
+
+\paragraph{The pool is a night-time machine.} Availability swings from
+\MinAvail{} to \PeakAvail{} of 1,000 phones over the day
+(Figure~\ref{fig:timeline}), and \NightSharePct\% of tokens are produced
+between 22:00 and 08:00. Daytime sessions are short and scattered, so few
+complete 16-phone pipelines form. A phone pool is best treated as a batch
+system that drains a queue overnight.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/policies}
+\caption{Throughput and shard traffic of the seven policies (1,000 phones,
+mean $\pm$ s.d.\ over \Seeds{} seeds).}
+\label{fig:policies}
+\end{figure*}
+
+\paragraph{Moving shards, not lost work, is the cost of churn.}
+Figure~\ref{fig:policies} compares the policies. Restart and replay differ
+by only \RestartVsReplayPct\% in throughput, so the computation lost to
+departures is small. What separates the policies is data movement: under
+replay, every repair recruits whichever phone is idle, which rarely holds the
+needed block, and the pool downloads \GBReplay\,GB of weights for every
+million tokens it produces, enough to make a volunteer's monthly data cap the
+binding constraint.
+
+\paragraph{The components only work together.} Each part of NightShift alone
+is a poor trade. Sticky shards halve traffic (\GBSticky\,GB) but lose
+\StickyGainPct\% throughput, because a vacant stage now waits for a phone that
+holds its block. Lifetime grouping alone is worse than random
+(\TputLifetime{} tokens/s, \GBLifetime\,GB), because ranking phones by
+predicted stay overrides the reuse of cached blocks. Consolidation alone gives
+the highest throughput (\ConsolGainPct\%) but keeps traffic near replay's
+(\GBConsol\,GB). Combined, consolidation supplies the home-block phones that
+sticky repairs wait for: NightShift downloads \GBNS\,GB per million tokens
+(\GBRatio$\times$ less than replay), suffers \FailDropPct\% fewer stage
+failures, and delivers \TputNS{} tokens/s per 1,000 phones against
+\TputReplay{} for replay (+\TputGainPct\%). Its stages spend \UsefulNS\% of
+their time computing rather than waiting, against \UsefulReplay\%. If shard
+traffic were free, consolidation alone would be the better policy at this
+pool size; it is not free for the phones' owners.
+
+\paragraph{Standbys are a bad trade on phones.} One standby per stage cuts
+throughput by \StandbyDropPct\%: it removes half of the pool from service to
+protect pipelines whose expected lifetime, at night, is hours. Standbys pay off
+when failures are frequent relative to the cost of idling capacity, which is
+the case for preemptible cloud GPUs~\cite{bamboo} but not here.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/scale}
+\caption{NightShift improves with pool size; replay does not. Shard traffic is
+on a logarithmic scale.}
+\label{fig:scale}
+\end{figure}
+
+\paragraph{NightShift gets better with scale.} With more phones, each block
+has more idle owners to choose from, so a sticky repair almost never has to
+wait or download (Figure~\ref{fig:scale}). From 500 to 4,000 phones,
+NightShift's throughput rises from \SwPoolLoNS{} to \SwPoolHiNS{} tokens/s per
+1,000 phones and its traffic falls from \PoolSmallGBNS{} to
+\PoolLargeGBNS\,GB per million tokens, while replay stays flat
+(\SwPoolLoReplay{} to \SwPoolHiReplay{}) and its traffic grows. At 500 phones,
+NightShift is \PoolSmallGainPct\% behind replay in throughput; at 4,000 it is
+\PoolLargeGainPct\% ahead with \PoolLargeGBRatio$\times$ less traffic. This is
+the regime that matters: a deployment worth building has far more than 4,000
+phones.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/sweeps}
+\caption{Sensitivity of throughput to the main assumptions, replay vs.\
+NightShift (1,000 phones, mean of 3 seeds).}
+\label{fig:sweeps}
+\end{figure*}
+
+\paragraph{Sensitivity.} Figure~\ref{fig:sweeps} varies one assumption at a
+time. Three matter a lot. The share of nights a phone charges moves
+NightShift's throughput from \SwNightLoNS{} to \SwNightHiNS{} tokens/s per
+1,000 phones between 50\% and 100\% of nights (at 50\%, replay is slightly
+ahead). The batch size moves it from \SwBatchLoNS{} (16 sequences) to
+\SwBatchHiNS{} (48), because more sequences keep more stages busy; memory for
+the KV cache caps this. The relative cost of prefill moves it from
+\SwPrefillLoNS{} to \SwPrefillHiNS, since every repair replays the prompt.
+Longer daytime sessions help only modestly (\SwDayDurLoNS{} to
+\SwDayDurHiNS), confirming that the night carries the system. Hop latency
+sets per-token latency (Figure~\ref{fig:latency}: \LatLAN\,s at 5\,ms,
+\LatWAN\,s at 60\,ms, \LatSlow\,s at 120\,ms) and, because a round cannot be
+shorter than one token's trip, also throughput (\SwHopLoNS{} to \SwHopHiNS).
+Grouping pipelines by region, so that hops stay short, is therefore worth more
+than any scheduling refinement. Across every setting, NightShift downloads
+\GBRatioMin--\GBRatioMax$\times$ less than replay.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\columnwidth]{figures/latency}
+\caption{Median time per output token against one-way hop latency.}
+\label{fig:latency}
+\end{figure}
+
+\section{Toward validation}
+\label{sec:validation}
+
+Simulation with assumed parameters can show which design choices matter, but
+not absolute numbers. We release a benchmark kit that replaces each assumption
+with a measurement and re-runs every experiment unchanged:
+\begin{itemize}
+\item \textbf{Compute.} llama.cpp~\cite{llamacpp} on Android (Termux) measures
+decode and prefill speed for an 8B model, the cost of batching 1--8 sequences,
+sustained speed under thermal throttling, and battery draw. Per-layer time is
+scaled to the 70B layer by bytes of weights read, since phone decode is
+memory-bandwidth bound.
+\item \textbf{Network.} Round-trip time and throughput between phones on the
+same and on different networks.
+\item \textbf{Pipeline.} llama.cpp's RPC backend runs an 8B model split over
+1--4 phones, validating the latency model (sum of stage times plus hops).
+\item \textbf{Availability.} A logger records charging and Wi-Fi state every
+five minutes for 14 days on volunteers' phones; the trace replaces the
+synthetic diurnal model. Large published traces~\cite{yang2021heterogeneity}
+are an alternative.
+\end{itemize}
+Measured values: \TODO{per-device table: decode tok/s, prefill ratio, batching
+cost, sustained tok/s, W; RTT; RPC latency vs.\ prediction; trace statistics}.
+
+\section{Limitations and ethics}
+\label{sec:limits}
+
+\paragraph{Privacy.} A stage sees the activations of the prompts that pass
+through it, and activations can leak their input. We therefore restrict the
+design to work whose inputs are not sensitive (public corpora, synthetic data)
+until a defence exists.
+\paragraph{Integrity.} A volunteer can return wrong activations. Redundant
+execution~\cite{boinc} doubles cost; lightweight checks such as
+TOPLOC~\cite{toploc} are promising and untested on phones.
+\paragraph{Owners.} Overnight compute adds heat and battery wear and uses the
+owner's electricity. Participation must be explicit, revocable and limited by
+temperature; the federated learning eligibility rule is a minimum, not a
+licence. We have not modelled incentives.
+\paragraph{Model fidelity.} The simulator ignores stragglers within a stage,
+thermal throttling over a night, Wi-Fi contention in one home, and iOS's
+stricter background limits. Shard downloads are counted, not simulated as
+competing traffic.
+
+\section{Conclusion}
+
+A pool of charging phones can, in principle, run a model far larger than any
+phone, but only as an overnight batch system with seconds of latency per token
+and worse energy efficiency than a GPU. Within that regime, the decisive design
+choice is to keep model shards where they are: sticky ownership, pipelines of
+phones that leave together and consolidation at dawn remove most shard traffic
+without losing throughput, and the benefit grows with the pool, while
+standbys hurt. The next step is to replace
+our assumptions with measurements from real phones and real owners.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\end{document}
