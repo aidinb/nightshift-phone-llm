@@ -116,8 +116,53 @@ put("ConsolGainPct", 100 * (m("consolidate", "tokens_per_s_per_1k_phones") / m("
 put("StickyGainPct", 100 * (m("sticky", "tokens_per_s_per_1k_phones") / m("replay", "tokens_per_s_per_1k_phones") - 1), "{:+.0f}")
 put("FailDropPct", 100 * (1 - m("nightshift", "failures") / m("replay", "failures")))
 
+# ranges for prose and figure descriptions
+BASE = ["restart", "replay", "cacheaware", "standby", "lifetime", "consolidate"]
+put("GBBaseMin", min(G(p) for p in BASE))
+put("GBBaseMax", max(G(p) for p in BASE))
+put("GBRatioBaseMin", min(G(p) for p in BASE) / G("nightshift"), "{:.0f}")
+put("GBRatioBaseMax", max(G(p) for p in BASE) / G("nightshift"), "{:.0f}")
+ALLP = [p for p, _ in TAGS]
+put("TputMin", min(T(p) for p in ALLP))
+put("TputMax", max(T(p) for p in ALLP))
+d = pol["restart"]["vs_replay"]["tokens_per_s_per_1k_phones"]
+put("CIRepRestartPct", 100 * d["ci95"] / T("replay"), "{:.1f}")
+TRI = ["replay", "cacheaware", "consolidate"]
+put("GBTriMin", min(G(p) for p in TRI))
+put("GBTriMax", max(G(p) for p in TRI))
+for v, tag in (("1", "One"), ("16", "Full")):
+    put(f"CacheTri{tag}Min", min(cb[v][p]["total_gb_per_mtoken"]["mean"] for p in TRI))
+    put(f"CacheTri{tag}Max", max(cb[v][p]["total_gb_per_mtoken"]["mean"] for p in TRI))
+put("CacheNSMin", min(cb[v]["nightshift"]["total_gb_per_mtoken"]["mean"] for v in cb))
+put("CacheNSMax", max(cb[v]["nightshift"]["total_gb_per_mtoken"]["mean"] for v in cb))
+pv = sorted(pool, key=float)
+put("PoolTputBaseMin", min(pool[v][p]["tokens_per_s_per_1k_phones"]["mean"] for v in pv for p in TRI))
+put("PoolTputBaseMax", max(pool[v][p]["tokens_per_s_per_1k_phones"]["mean"] for v in pv for p in TRI))
+put("PoolGBBaseMin", min(pool[v][p]["total_gb_per_mtoken"]["mean"] for v in pv for p in TRI))
+put("PoolGBBaseMax", max(pool[v][p]["total_gb_per_mtoken"]["mean"] for v in pv for p in TRI))
+cross = [v for v in pv if pool[v]["nightshift"]["tokens_per_s_per_1k_phones"]["mean"]
+         >= pool[v]["consolidate"]["tokens_per_s_per_1k_phones"]["mean"]]
+put("PoolCross", int(cross[0]) if cross else 0, "{:,}")
+gains = {(pr, v): pct(sw[pr][v]["nightshift"]["tokens_per_s_per_1k_phones"]["mean"],
+                      sw[pr][v]["replay"]["tokens_per_s_per_1k_phones"]["mean"])
+         for pr in sw for v in sw[pr] if "replay" in sw[pr][v]}
+put("SwGainMin", min(gains.values()), "{:+.0f}")
+put("SwGainMax", max(gains.values()), "{:+.0f}")
+nv = sorted(sw["night_prob"], key=float)
+put("SwNightLoGainPct", gains[("night_prob", nv[0])], "{:+.0f}")
+put("SwNightHiGainPct", gains[("night_prob", nv[-1])], "{:+.0f}")
+dv = sorted(sw["day_dur_median_min"], key=float)
+put("DayGainPct", pct(sw["day_dur_median_min"][dv[-1]]["nightshift"]["tokens_per_s_per_1k_phones"]["mean"],
+                      sw["day_dur_median_min"][dv[0]]["nightshift"]["tokens_per_s_per_1k_phones"]["mean"]), "{:+.0f}")
+hv = sorted(h, key=float)
+put("LatMinFig", min(h[v][p]["token_time_p50_s"]["mean"] for v in hv for p in h[v]), "{:.1f}")
+put("LatMaxFig", max(h[v][p]["token_time_p50_s"]["mean"] for v in hv for p in h[v]), "{:.1f}")
+put("PassLAN", h["0.005"]["nightshift"]["pass_latency_p50_s"]["mean"], "{:.1f}")
+put("PassWAN", h["0.06"]["nightshift"]["pass_latency_p50_s"]["mean"], "{:.1f}")
+
 meta = R("meta.json")
 put("Seeds", len(meta["seeds"]))
+put("SweepSeeds", len(meta.get("sweep_seeds", meta["seeds"])))
 put("NPhones", meta["n_phones"], "{:,}")
 
 out = os.path.join(HERE, "..", "paper", "numbers.tex")

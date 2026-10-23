@@ -8,14 +8,14 @@ kit exists so those assumptions can be replaced by measurements before submissio
 - `paper/` — `main.tex` (ACM acmart), `references.bib` (27 entries, checked),
   `numbers.tex` (generated, do not edit), `figures/` (generated), `main.pdf`
   (anonymous review build), `main-arxiv.pdf` (named preprint build).
-- `sim/` — `phonesim.py` (discrete-event simulator, 7 policies), `experiments.py`,
+- `sim/` — `phonesim.py` (time-stepped simulator, 10-second ticks, 10 policies), `experiments.py`,
   `figures.py`, `make_numbers.py`, `results/*.json`.
 - `bench/` — scripts to run on Android phones in Termux.
 
 ## Rebuild everything
 ```bash
 cd sim
-python3 experiments.py          # ~minutes; --quick for 2 seeds
+python3 experiments.py          # a few hours on 4 cores; --quick for 2 seeds
 python3 figures.py              # writes ../paper/figures/*.pdf
 python3 make_numbers.py         # writes ../paper/numbers.tex
 cd ../paper

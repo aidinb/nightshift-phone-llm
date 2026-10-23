@@ -77,7 +77,7 @@ def main():
     for param, values in sweeps.items():
         for v in values:
             for pol in sweep_pols.get(param, ["replay", "nightshift"]):
-                for s in SEEDS[:3]:
+                for s in SEEDS:
                     kw = dict(n_phones=N, seed=s)
                     kw[param] = v
                     jobs.append((f"sweep:{param}", pol, kw))

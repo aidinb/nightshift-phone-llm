@@ -12,16 +12,21 @@ shard cache, so the comparison isolates placement and recovery; see POLICIES):
 
   restart      random placement; a departure loses every in-flight sequence
   replay       random groups of phones; a departure is repaired by recruiting
-               a new phone and replaying the lost stage's KV cache
-  cacheaware   replay, but each pipeline is formed from phones that already
-               cache its blocks (the fair, cache-aware baseline)
+               a new phone and replaying the lost stage's KV cache. Formation
+               (within the group) and repair (across the idle pool) both
+               prefer a phone that already caches the block
+  cacheaware   replay, but pipelines are formed by matching each block to
+               idle phones that cache it across the whole idle pool (the fair,
+               cache-aware baseline); it never waits
   standby      replay + one dedicated warm standby per stage
   lifetime     replay + pipelines formed from phones with similar predicted
                session end, so one short-lived member does not end a pipeline
   consolidate  replay + a damaged pipeline donates its phones to repair others
-  wait         cacheaware + a fixed home block per phone, and repairs wait
-               briefly for a phone that already holds the block
+  wait         a fixed home block per phone; pipelines form only from complete
+               sets of idle home-block phones (random order), and repairs wait
+               up to sticky_fallback_s for a home-block phone before downloading
   sticky       wait + lifetime grouping
+  nightshift_nowait  sticky + consolidate, with no wait (download at once)
   nightshift   sticky + consolidate (the design proposed in the paper)
 
 Measured parameters: set PHONESIM_PARAMS=path/to/params.json (written by
@@ -566,18 +571,20 @@ class Sim:
         self._vacant_since.pop(pid, None)
 
     def consolidate(self, t: float):
-        """When pipelines have vacant stages that the idle pool cannot fill,
-        dissolve the most damaged one (most vacancies, then least progress) and
-        give its phones, which already hold blocks of the same catalogue, to the
-        others. A donated phone loads its block from flash in seconds instead of
-        downloading it, so a pool shrinking at dawn keeps as many complete
-        pipelines as it can afford rather than many broken ones."""
+        """Runs every tick, after this tick's repairs. If two or more pipelines
+        still have a vacant stage (repair could not, or under the sticky rule
+        chose not to, fill it), dissolve the most damaged one (most vacancies,
+        then least progress) and give its phones, which already hold blocks of
+        the same catalogue, to the others. A donated phone loads its block from
+        flash in seconds instead of downloading it, so a shrinking pool (in
+        practice, at dawn) keeps as many complete pipelines as it can afford
+        rather than many broken ones."""
         while True:
             vacant = [pl for pl in self.pipes.values()
                       if any(s is None for s in pl.stages)]
             if len(vacant) < 2:
-                # a single broken pipeline: only dissolve it if the idle pool
-                # cannot repair it, so its phones can join a new pipeline later
+                # a single broken pipeline has no one to donate to; it is
+                # left to repair or to dissolve_starved
                 return
             worst = max(vacant, key=lambda pl: (sum(s is None for s in pl.stages),
                                                 -pl.progress))
