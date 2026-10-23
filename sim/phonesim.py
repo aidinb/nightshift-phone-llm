@@ -106,6 +106,7 @@ class Config:
     consolidate: bool = True         # donate phones of the most damaged pipeline
     standbys: int = 0                # dedicated warm standbys per stage
     sticky_fallback_s: float = 300.0 # sticky: wait this long for a home-block phone before downloading
+    trace: bool = False              # return the per-assignment event trace (traffic model check)
     lifetime_order: bool = True      # sticky: order phones by predicted stay (False = random)
     eval_start_h: float = 12.0       # evaluate a 24 h window starting at noon
     eval_hours: float = 24.0
@@ -316,6 +317,15 @@ class Sim:
         self._avail_t = -1.0
         self._avail: List[bool] = []
         self._vacant_since: Dict[int, float] = {}
+        # per-assignment trace for the analytical traffic model (sim/traffic_model.py):
+        # (context..., missed) where missed = the block had to be downloaded
+        self.events: List[tuple] = []
+        self._ctx: Optional[tuple] = None
+        self._measuring = False
+        self._vac_first: Dict[Tuple[int, int], Tuple[int, float]] = {}
+        self._calls = 0
+        self.arrivals = [0] * 24               # phones joining the idle pool (new eligible
+                                               # sessions + released by a dissolve), by hour
 
     # ---- helpers
     def available(self, p: Phone, t: float) -> bool:
@@ -366,7 +376,10 @@ class Sim:
         p.role, p.pipe = role, pipe
         lt = self.load_time(p, block)
         self.served.add(p.pid)
-        if block in p.cached:
+        missed = block not in p.cached
+        if self._measuring and self._ctx is not None:
+            self.events.append(self._ctx + (missed,))
+        if not missed:
             p.cached.remove(block)
         else:
             self.bytes_downloaded += self.block_gb
@@ -374,9 +387,11 @@ class Sim:
         del p.cached[max(1, self.cfg.cache_blocks):]
         return t + lt
 
-    def release(self, pid: int):
+    def release(self, pid: int, t: Optional[float] = None):
         p = self.phones[pid]
         p.role, p.pipe = "idle", None
+        if t is not None and self._measuring:      # back to the idle pool, still plugged in
+            self.arrivals[int(t % DAY // HOUR)] += 1
 
     # ---- pipeline performance
     def stage_time(self, p: Phone) -> float:
@@ -428,12 +443,14 @@ class Sim:
             del ranked[:per_pipe]
             stages, ready, standbys = [], [], []
             for b in range(self.n_blocks):
+                self._ctx = ("form_group", len(group))
                 p = self.take_for_block(group, b)
                 ready.append(self.assign(p, "stage", pid, b, t))
                 stages.append(p.pid)
             for b in range(self.n_blocks):
                 sb = []
                 for _ in range(self.k):
+                    self._ctx = ("form_group", len(group))
                     p = self.take_for_block(group, b)
                     self.assign(p, "standby", pid, b, t)
                     sb.append(p.pid)
@@ -466,6 +483,8 @@ class Sim:
                         used.add(p.pid)
                         break
         rest = [p for p in pool if p.pid not in used]
+        self._calls += 1
+        self._ctx = ("form_cache", len(pool), n_pipes, self._calls)
         for i in range(n_pipes):
             pid = self.next_pipe
             self.next_pipe += 1
@@ -492,6 +511,7 @@ class Sim:
             self.next_pipe += 1
             stages, ready, standbys = [], [], []
             for b in range(self.n_blocks):
+                self._ctx = ("form_sticky",)
                 p = buckets[b].pop(0)
                 ready.append(self.assign(p, "stage", pid, b, t))
                 stages.append(p.pid)
@@ -537,17 +557,23 @@ class Sim:
             else:
                 if pool is None:
                     pool = self.rank(self.idle_pool(t), t)
+                first_pool, first_t = self._vac_first.setdefault((pl.pid, b), (len(pool), t))
+                # wait this stage still has under the sticky rule (the clock is per pipeline)
+                wait_left = max(0.0, self._vacant_since.get(pl.pid, first_t)
+                                + self.cfg.sticky_fallback_s - first_t)
                 if self.sticky and not any(q.home_block == b for q in pool):
                     since = self._vacant_since.get(pl.pid, t)
                     if t - since < self.cfg.sticky_fallback_s:
                         self._vacant_since.setdefault(pl.pid, t)
                         pl.stalled_until = max(pl.stalled_until, t + self.cfg.tick_s)
                         continue
+                self._ctx = ("repair", len(pool), first_pool, wait_left, first_t % DAY / HOUR)
                 p = self.take_for_block(pool, b)
                 if p is None:
                     pl.stalled_until = max(pl.stalled_until, t + self.cfg.tick_s)
                     continue
                 ready = self.assign(p, "stage", pl.pid, b, t)
+                self._vac_first.pop((pl.pid, b), None)
             pl.stages[b] = p.pid
             self.loss["load"] += ready - t
             if self.cfg.recovery == "replay":
@@ -559,15 +585,15 @@ class Sim:
                 self.loss["transfer"] += xt
             pl.stalled_until = max(pl.stalled_until, ready)
 
-    def dissolve(self, pid: int):
+    def dissolve(self, pid: int, t: Optional[float] = None):
         pl = self.pipes.pop(pid)
         self.lost_work += pl.progress * self.cfg.batch_seqs
         for s in pl.stages:
             if s is not None:
-                self.release(s)
+                self.release(s, t)
         for sb in pl.standbys:
             for s in sb:
-                self.release(s)
+                self.release(s, t)
         self._vacant_since.pop(pid, None)
 
     def consolidate(self, t: float):
@@ -588,7 +614,7 @@ class Sim:
                 return
             worst = max(vacant, key=lambda pl: (sum(s is None for s in pl.stages),
                                                 -pl.progress))
-            self.dissolve(worst.pid)
+            self.dissolve(worst.pid, t)
             self.consolidations += 1
             for pl in vacant:
                 if pl.pid in self.pipes:
@@ -603,6 +629,7 @@ class Sim:
                 while len(sb) < self.k:
                     if pool is None:
                         pool = self.rank(self.idle_pool(t), t)
+                    self._ctx = ("refill", len(pool))
                     p = self.take_for_block(pool, b)
                     if p is None:
                         return
@@ -621,10 +648,10 @@ class Sim:
                 self.lost_work += pl.progress * self.cfg.batch_seqs
                 for s in pl.stages:
                     if s is not None:
-                        self.release(s)
+                        self.release(s, t)
                 for sb in pl.standbys:
                     for s in sb:
-                        self.release(s)
+                        self.release(s, t)
                 del self.pipes[pid]
                 del self._vacant_since[pid]
 
@@ -639,6 +666,7 @@ class Sim:
         self.latency_samples, self.tok_time_samples, self._seen = [], [], 0
         self.served = {p.pid for p in self.phones if p.role != "idle"}
         self.timeline = []
+        self.events, self.arrivals = [], [0] * 24
 
     # ---- main loop
     def run(self) -> dict:
@@ -649,6 +677,9 @@ class Sim:
             if not measuring and t >= self.t0:
                 self._reset_metrics()
                 measuring = True
+            self._measuring = measuring
+            if measuring:
+                prev = self._avail if self._avail_t == t - cfg.tick_s else None
             self.handle_departures(t)
             if cfg.consolidate:
                 self.consolidate(t)
@@ -683,6 +714,9 @@ class Sim:
                         1 for s in pl.stages if s is not None) * cfg.tick_s
             self.pipe_seconds_running += running * cfg.tick_s
             avail = sum(1 for p in self.phones if self.available(p, t) and self.eligible(p))
+            if measuring and prev is not None:
+                self.arrivals[int(t % DAY // HOUR)] += sum(1 for q in self.phones
+                                     if self._avail[q.pid] and not prev[q.pid] and self.eligible(q))
             # oracle: every eligible available phone in a complete pipeline, instantly
             self.oracle_pipe_seconds += (avail // self.n_blocks) * cfg.tick_s
             if t >= self.t0 and int((t - self.t0) // cfg.tick_s) % 30 == 0:
@@ -721,6 +755,11 @@ class Sim:
             "token_time_p50_s": tok[len(tok) // 2] if tok else float("nan"),
             "eligible_frac": sum(self.eligible(p) for p in self.phones) / len(self.phones),
             "timeline": self.timeline,
+            "events": self.events if cfg.trace else None,
+            "arrivals_per_s_by_hour": [x / (secs / 24) for x in self.arrivals],
+            "delivered_tokens": self.delivered_tokens,
+            "block_gb": self.block_gb,
+            "n_blocks": self.n_blocks,
         }
 
 

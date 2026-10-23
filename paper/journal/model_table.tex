@@ -1,0 +1,38 @@
+\begin{table}[t]
+\centering
+\caption{Shard traffic predicted by the analytical model against the simulator (GB of model blocks downloaded per million delivered tokens; activations excluded). Downloads are split into those at pipeline formation and those at repair or refill (counts per run, simulator / model). Means over seeds.}
+\label{tab:model}
+\small
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{llrrrrr}
+\toprule
+Policy & Phones & Sim. & Model & Error & Formation & Repair \\
+\midrule
+Restart & 1,000 & 375.2 & 386.9 & +3.1\% & 439 / 415 & 889 / 955 \\
+Replay & 1,000 & 361.9 & 373.3 & +3.1\% & 439 / 415 & 889 / 955 \\
+Cache-aware & 1,000 & 316.2 & 335.6 & +6.1\% & 282 / 289 & 896 / 961 \\
+Standby & 1,000 & 442.8 & 446.3 & +0.8\% & 244 / 211 & 738 / 778 \\
+Lifetime & 1,000 & 560.5 & 564.7 & +0.7\% & 737 / 755 & 1227 / 1224 \\
+Consolidate & 1,000 & 323.4 & 349.4 & +8.0\% & 501 / 511 & 781 / 873 \\
+Wait & 1,000 & 251.2 & 274.3 & +9.2\% & 152 / 165 & 654 / 716 \\
+Sticky & 1,000 & 247.4 & 277.1 & +12.0\% & 154 / 174 & 654 / 731 \\
+NightShift, no wait & 1,000 & 273.5 & 291.6 & +6.6\% & 187 / 196 & 754 / 808 \\
+NightShift & 1,000 & 30.3 & 29.6 & -2.5\% & 28 / 27 & 85 / 84 \\
+\midrule
+Replay & 500 & 331.5 & 339.9 & +2.5\% & 217 / 209 & 403 / 426 \\
+Cache-aware & 500 & 287.5 & 307.2 & +6.8\% & 157 / 155 & 384 / 425 \\
+Consolidate & 500 & 306.3 & 326.3 & +6.5\% & 241 / 247 & 365 / 398 \\
+NightShift & 500 & 130.1 & 126.8 & -2.5\% & 60 / 46 & 157 / 167 \\
+\midrule
+Replay & 2,000 & 365.5 & 377.6 & +3.3\% & 925 / 872 & 1804 / 1948 \\
+Cache-aware & 2,000 & 311.3 & 335.2 & +7.7\% & 545 / 587 & 1817 / 1956 \\
+Consolidate & 2,000 & 312.8 & 333.1 & +6.5\% & 971 / 948 & 1569 / 1756 \\
+NightShift & 2,000 & 11.9 & 13.4 & +12.2\% & 20 / 27 & 79 / 84 \\
+\midrule
+Replay & 4,000 & 378.9 & 390.7 & +3.1\% & 1892 / 1823 & 3805 / 4052 \\
+Cache-aware & 4,000 & 314.4 & 340.2 & +8.2\% & 1031 / 1136 & 3766 / 4055 \\
+Consolidate & 4,000 & 311.4 & 331.9 & +6.6\% & 1838 / 1800 & 3263 / 3636 \\
+NightShift & 4,000 & 5.1 & 4.8 & -5.3\% & 18 / 20 & 72 / 65 \\
+\bottomrule
+\end{tabular}}
+\end{table}

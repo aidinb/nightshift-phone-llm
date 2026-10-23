@@ -6,3 +6,5 @@ __pycache__/
 *.out
 *.blg
 *.synctex.gz
+paper/journal/*.bbl
+paper/journal/*.spl
