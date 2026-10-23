@@ -1,8 +1,9 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Phone-to-phone RTT and throughput on the same Wi-Fi.
-# On phone A: iperf3 -s      On phone B: PEER=<ip of A> bash 03_bench_network.sh
+# On the peer (laptop or phone A): iperf3 -s  and  python3 echo_server.py
+# On this phone: bash 03_bench_network.sh <ip of the peer>
 set -euo pipefail
-: "${PEER:?set PEER to the other phone's IP}"
+PEER=${PEER:-${1:-}}; : "${PEER:?usage: bash 03_bench_network.sh <ip of the laptop or other phone>}"
 OUT=~/phonebench/net_$(date +%Y%m%d_%H%M%S); mkdir -p "$OUT"
 ping -c 100 -i 0.2 "$PEER" > "$OUT/ping.txt"
 iperf3 -c "$PEER" -t 20 -J > "$OUT/iperf_up.json"

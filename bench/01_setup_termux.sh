@@ -9,7 +9,7 @@ cd ~
 [ -d llama.cpp ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp
 cd llama.cpp
 cmake -B build -DGGML_RPC=ON -DLLAMA_CURL=OFF
-cmake --build build --config Release -j"$(nproc)" --target llama-bench llama-cli rpc-server
+cmake --build build --config Release -j"$(nproc)" --target llama-bench llama-batched-bench llama-cli rpc-server
 mkdir -p ~/models && cd ~/models
 # Llama 3.1 8B Instruct, 4-bit (about 4.9 GB). Swap for a 3B model on 6 GB phones.
 MODEL_URL=${MODEL_URL:-https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf}
