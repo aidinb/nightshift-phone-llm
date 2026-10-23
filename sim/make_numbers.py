@@ -12,18 +12,42 @@ macros = {}
 def put(name, val, fmt="{:.0f}"):
     macros[name] = fmt.format(val)
 
-for p, tag in [("restart", "Restart"), ("replay", "Replay"), ("standby", "Standby"),
-               ("lifetime", "Lifetime"), ("consolidate", "Consol"), ("sticky", "Sticky"),
-               ("nightshift", "NS")]:
+TAGS = [("restart", "Restart"), ("replay", "Replay"), ("cacheaware", "CA"),
+        ("standby", "Standby"), ("lifetime", "Lifetime"), ("consolidate", "Consol"),
+        ("wait", "Wait"), ("sticky", "Sticky"), ("nightshift_nowait", "NSNoWait"),
+        ("nightshift", "NS")]
+for p, tag in TAGS:
     put(f"Tput{tag}", m(p, "tokens_per_s_per_1k_phones"))
-    put(f"GB{tag}", m(p, "gb_per_mtoken"), "{:.1f}")
+    put(f"GB{tag}", m(p, "total_gb_per_mtoken"))           # shards + activations
+    put(f"Shard{tag}", m(p, "gb_per_mtoken"))
+    put(f"Act{tag}", m(p, "act_gb_per_mtoken"))
+    put(f"PhoneGB{tag}", m(p, "gb_per_serving_phone"), "{:.1f}")
+    d = pol[p]["vs_replay"]["tokens_per_s_per_1k_phones"]
+    put(f"DiffRep{tag}", d["mean"], "{:+.1f}")
+    put(f"CIRep{tag}", d["ci95"], "{:.1f}")
+    d = pol[p]["vs_consolidate"]["tokens_per_s_per_1k_phones"]
+    put(f"DiffCons{tag}", d["mean"], "{:+.1f}")
+    put(f"CICons{tag}", d["ci95"], "{:.1f}")
+    put(f"TputSD{tag}", pol[p]["tokens_per_s_per_1k_phones"]["sd"], "{:.1f}")
     put(f"Oracle{tag}", 100 * m(p, "oracle_pipe_frac"))
     put(f"Fail{tag}", m(p, "failures"))
     put(f"Useful{tag}", 100 * m(p, "useful_stage_frac"))
     put(f"J{tag}", m(p, "joules_per_token"), "{:.0f}")
-    put(f"Lat{tag}", m(p, "token_latency_p50_s"), "{:.1f}")
+    put(f"Lat{tag}", m(p, "token_time_p50_s"), "{:.1f}")
+pct = lambda a, b: 100 * (a / b - 1)  # noqa: E731
+T = lambda p: m(p, "tokens_per_s_per_1k_phones")  # noqa: E731
+G = lambda p: m(p, "total_gb_per_mtoken")  # noqa: E731
+put("NSvsReplayPct", pct(T("nightshift"), T("replay")), "{:+.0f}")
+put("NSvsConsolPct", pct(T("nightshift"), T("consolidate")), "{:+.0f}")
+put("NSbehindConsolPct", -pct(T("nightshift"), T("consolidate")), "{:.0f}")
+put("NSvsCAPct", pct(T("nightshift"), T("cacheaware")), "{:+.0f}")
+put("CAvsReplayPct", pct(T("cacheaware"), T("replay")), "{:+.0f}")
+put("WaitvsCAPct", pct(T("wait"), T("cacheaware")), "{:+.0f}")
+put("GBRatioCA", G("cacheaware") / G("nightshift"))
+put("GBRatioConsol", G("consolidate") / G("nightshift"))
+put("ShardRatio", m("replay", "gb_per_mtoken") / m("nightshift", "gb_per_mtoken"))
 put("TputGainPct", 100 * (m("nightshift", "tokens_per_s_per_1k_phones") / m("replay", "tokens_per_s_per_1k_phones") - 1))
-ratio = m("replay", "gb_per_mtoken") / max(1e-9, m("nightshift", "gb_per_mtoken"))
+ratio = G("replay") / max(1e-9, G("nightshift"))
 put("GBRatio", ratio, "{:.0f}" if ratio < 1000 else "{:.0e}")
 put("StandbyDropPct", 100 * (1 - m("standby", "tokens_per_s_per_1k_phones") / m("replay", "tokens_per_s_per_1k_phones")))
 put("RestartVsReplayPct", 100 * (m("restart", "tokens_per_s_per_1k_phones") / m("replay", "tokens_per_s_per_1k_phones") - 1), "{:+.0f}")
@@ -45,9 +69,9 @@ put("MinAvail", min(avail))
 put("PeakPipes", max(r[2] for r in t))
 
 h = sw["hop_latency_s"]
-put("LatLAN", h["0.005"]["nightshift"]["token_latency_p50_s"]["mean"], "{:.1f}")
-put("LatWAN", h["0.06"]["nightshift"]["token_latency_p50_s"]["mean"], "{:.1f}")
-put("LatSlow", h["0.12"]["nightshift"]["token_latency_p50_s"]["mean"], "{:.1f}")
+put("LatLAN", h["0.005"]["nightshift"]["token_time_p50_s"]["mean"], "{:.1f}")
+put("LatWAN", h["0.06"]["nightshift"]["token_time_p50_s"]["mean"], "{:.1f}")
+put("LatSlow", h["0.12"]["nightshift"]["token_time_p50_s"]["mean"], "{:.1f}")
 for param, key in [("day_dur_median_min", "DayDur"), ("night_prob", "Night"),
                    ("prefill_efficiency", "Prefill"), ("n_phones", "Pool"),
                    ("batch_seqs", "Batch"), ("hop_latency_s", "Hop")]:
@@ -58,18 +82,36 @@ for param, key in [("day_dur_median_min", "DayDur"), ("night_prob", "Night"),
         put(f"Sw{key}Lo{ptag}", lo)
         put(f"Sw{key}Hi{ptag}", hi)
 
-# shard traffic, replay / nightshift, across every sweep setting
-ratios = [sw[pr][v]["replay"]["gb_per_mtoken"]["mean"] / sw[pr][v]["nightshift"]["gb_per_mtoken"]["mean"]
-          for pr in sw for v in sw[pr]]
+# total traffic, replay / nightshift, across every sweep setting that runs both
+ratios = [sw[pr][v]["replay"]["total_gb_per_mtoken"]["mean"]
+          / sw[pr][v]["nightshift"]["total_gb_per_mtoken"]["mean"]
+          for pr in sw for v in sw[pr] if "replay" in sw[pr][v]]
 put("GBRatioMin", min(ratios))
 put("GBRatioMax", max(ratios))
 pool = sw["n_phones"]
 for v, tag in (("500", "Small"), ("4000", "Large")):
     for pname, ptag in (("replay", "Replay"), ("nightshift", "NS")):
-        put(f"Pool{tag}GB{ptag}", pool[v][pname]["gb_per_mtoken"]["mean"], "{:.1f}")
-    put(f"Pool{tag}GainPct", 100 * (pool[v]["nightshift"]["tokens_per_s_per_1k_phones"]["mean"]
-                                   / pool[v]["replay"]["tokens_per_s_per_1k_phones"]["mean"] - 1), "{:+.0f}")
-    put(f"Pool{tag}GBRatio", pool[v]["replay"]["gb_per_mtoken"]["mean"] / pool[v]["nightshift"]["gb_per_mtoken"]["mean"])
+        put(f"Pool{tag}GB{ptag}", pool[v][pname]["total_gb_per_mtoken"]["mean"])
+    pt = lambda p: pool[v][p]["tokens_per_s_per_1k_phones"]["mean"]  # noqa: E731
+    pg = lambda p: pool[v][p]["total_gb_per_mtoken"]["mean"]  # noqa: E731
+    put(f"Pool{tag}GainPct", pct(pt("nightshift"), pt("replay")), "{:+.0f}")
+    put(f"Pool{tag}VsConsolPct", pct(pt("nightshift"), pt("consolidate")), "{:+.0f}")
+    put(f"Pool{tag}GBRatio", pg("replay") / pg("nightshift"))
+    put(f"Pool{tag}GBRatioCA", pg("cacheaware") / pg("nightshift"))
+for pname, ptag in (("cacheaware", "CA"), ("consolidate", "Consol")):
+    put(f"SwPoolLo{ptag}", pool["500"][pname]["tokens_per_s_per_1k_phones"]["mean"])
+    put(f"SwPoolHi{ptag}", pool["4000"][pname]["tokens_per_s_per_1k_phones"]["mean"])
+cb = sw["cache_blocks"]
+for pname, ptag in (("replay", "Replay"), ("cacheaware", "CA"), ("consolidate", "Consol"),
+                    ("nightshift", "NS")):
+    put(f"CacheFull{ptag}", cb["16"][pname]["total_gb_per_mtoken"]["mean"])
+    put(f"CacheFullTput{ptag}", cb["16"][pname]["tokens_per_s_per_1k_phones"]["mean"])
+put("CacheFullRatioCA", cb["16"]["cacheaware"]["total_gb_per_mtoken"]["mean"]
+    / cb["16"]["nightshift"]["total_gb_per_mtoken"]["mean"])
+fw = sw["sticky_fallback_s"]
+for w, tag in (("0.0", "Zero"), ("60.0", "Sixty"), ("600.0", "Ten")):
+    put(f"Wait{tag}Tput", fw[w]["nightshift"]["tokens_per_s_per_1k_phones"]["mean"])
+    put(f"Wait{tag}GB", fw[w]["nightshift"]["total_gb_per_mtoken"]["mean"])
 put("ConsolGainPct", 100 * (m("consolidate", "tokens_per_s_per_1k_phones") / m("replay", "tokens_per_s_per_1k_phones") - 1), "{:+.0f}")
 put("StickyGainPct", 100 * (m("sticky", "tokens_per_s_per_1k_phones") / m("replay", "tokens_per_s_per_1k_phones") - 1), "{:+.0f}")
 put("FailDropPct", 100 * (1 - m("nightshift", "failures") / m("replay", "failures")))

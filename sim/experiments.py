@@ -31,16 +31,30 @@ def summarize(rows, keys):
     return out
 
 
-KEYS = ["tokens_per_s_per_1k_phones", "gb_per_mtoken", "failures", "useful_stage_frac",
-        "oracle_pipe_frac", "token_latency_p50_s", "joules_per_token", "mean_running_pipes",
-        "consolidations", "standby_swaps", "eligible_frac"]
+KEYS = ["tokens_per_s_per_1k_phones", "gb_per_mtoken", "act_gb_per_mtoken",
+        "total_gb_per_mtoken", "gb_per_serving_phone", "failures", "useful_stage_frac",
+        "oracle_pipe_frac", "token_time_p50_s", "pass_latency_p50_s", "joules_per_token",
+        "mean_running_pipes", "consolidations", "standby_swaps", "eligible_frac"]
+POLS = ["restart", "replay", "cacheaware", "standby", "lifetime", "consolidate", "wait",
+        "sticky", "nightshift_nowait", "nightshift"]
+T975 = {2: 12.71, 3: 4.30, 4: 3.18, 5: 2.78, 6: 2.57}   # two-sided 95% t quantiles
+
+
+def paired(rows, base_rows, key):
+    """Mean paired difference (same seed = same phone population) with a 95% CI."""
+    by = {r["seed"]: r[key] for r in base_rows}
+    d = [r[key] - by[r["seed"]] for r in rows if r["seed"] in by]
+    if len(d) < 2:
+        return {"mean": d[0] if d else 0.0, "ci95": float("nan"), "n": len(d)}
+    half = T975.get(len(d), 2.0) * statistics.stdev(d) / len(d) ** 0.5
+    return {"mean": statistics.mean(d), "ci95": half, "n": len(d)}
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
     jobs = []
     # E2: policy comparison
-    for pol in ["restart", "replay", "standby", "lifetime", "consolidate", "sticky", "nightshift"]:
+    for pol in POLS:
         for s in SEEDS:
             jobs.append(("policies", pol, dict(n_phones=N, seed=s)))
     # E1: timeline
@@ -54,10 +68,15 @@ def main():
         "batch_seqs": [16, 32, 48],
         "hop_latency_s": [0.005, 0.030, 0.060, 0.120],
         "n_phones": [500, 1000, 2000, 4000],
+        "cache_blocks": [1, 2, 4, 16],
+        "sticky_fallback_s": [0.0, 60.0, 120.0, 300.0, 600.0],
     }
+    sweep_pols = {"n_phones": ["replay", "cacheaware", "consolidate", "nightshift"],
+                  "cache_blocks": ["replay", "cacheaware", "consolidate", "nightshift"],
+                  "sticky_fallback_s": ["nightshift"]}
     for param, values in sweeps.items():
         for v in values:
-            for pol in ["replay", "nightshift"]:
+            for pol in sweep_pols.get(param, ["replay", "nightshift"]):
                 for s in SEEDS[:3]:
                     kw = dict(n_phones=N, seed=s)
                     kw[param] = v
@@ -75,8 +94,14 @@ def main():
             param = name.split(":", 1)[1]
             sweep_rows.setdefault(param, {}).setdefault(str(kw[param]), {}).setdefault(pol, []).append(r)
 
-    json.dump({p: summarize(rows, KEYS) for p, rows in pol_rows.items()},
-              open(os.path.join(OUT, "policies.json"), "w"), indent=1)
+    pol_out = {}
+    for p, rows in pol_rows.items():
+        pol_out[p] = summarize(rows, KEYS)
+        pol_out[p]["vs_replay"] = {k: paired(rows, pol_rows["replay"], k)
+                                   for k in ("tokens_per_s_per_1k_phones", "total_gb_per_mtoken")}
+        pol_out[p]["vs_consolidate"] = {k: paired(rows, pol_rows["consolidate"], k)
+                                        for k in ("tokens_per_s_per_1k_phones",)}
+    json.dump(pol_out, open(os.path.join(OUT, "policies.json"), "w"), indent=1)
     json.dump({param: {v: {p: summarize(rows, KEYS) for p, rows in pols.items()}
                        for v, pols in vals.items()} for param, vals in sweep_rows.items()},
               open(os.path.join(OUT, "sweeps.json"), "w"), indent=1)

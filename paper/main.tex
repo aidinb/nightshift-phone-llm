@@ -26,23 +26,27 @@
   \country{}}
 
 \begin{abstract}
-Billions of smartphones spend every night plugged in, on Wi-Fi, and idle.
-We ask whether that pool can run inference for a large language model too big
-for any single phone, and what it would take. A 70B-parameter model at 4-bit
-needs about 40\,GB, so one copy is a 16-stage pipeline of phones that leave
-whenever their owners unplug them. Using a simulator whose phone and network
-parameters are explicit, replaceable assumptions, we find three things.
-First, the pool is a night-time resource: \NightSharePct\% of a day's tokens
-are produced between 22:00 and 08:00. Second, per-token latency is seconds
-(\LatWAN\,s at 60\,ms per hop), so the useful workload is batch work, not chat.
-Third, the dominant cost of churn is not lost computation but moving model
-shards: a Petals-style design re-downloads \GBReplay\,GB of weights per million
-tokens. NightShift fixes each phone's shard for good, forms pipelines from
-phones expected to leave together, and consolidates broken pipelines at dawn.
-With 1,000 phones it cuts shard traffic \GBRatio$\times$ at equal or slightly
-higher throughput; its advantage grows with the pool, to \PoolLargeGBRatio$\times$
-less traffic and \PoolLargeGainPct\% throughput at 4,000 phones. Keeping warm
-standbys, the obvious fix, cuts throughput by \StandbyDropPct\%. We release the simulator and a benchmark kit so the
+Many smartphones spend the night plugged in, on Wi-Fi and idle.
+We ask whether such a pool can run inference for a large language model too
+big for any single phone, and what it would take. A 70B-parameter model at
+4-bit needs about 40\,GB, so one copy is a 16-stage pipeline of phones that
+leave whenever their owners unplug them. Using a simulator whose phone and
+network parameters are explicit, replaceable assumptions, we find three
+things. First, the pool is a night-time resource: \NightSharePct\% of a day's
+tokens are produced between 22:00 and 08:00. Second, each output token takes
+seconds (\LatWAN\,s at 60\,ms per hop), so the useful workload is batch work,
+not chat. Third, once phones come and go, the main cost of churn is moving
+model shards to the phones that replace leavers, not recomputing lost work:
+even a cache-aware baseline downloads \GBCA\,GB per million tokens, about
+\PhoneGBCA\,GB per serving phone per day. NightShift gives every phone a
+permanent home block, lets a vacant stage wait briefly for a phone that
+already holds it, and consolidates broken pipelines. With 1,000 phones it
+downloads \GBRatioCA--\GBRatio$\times$ less data than every baseline we
+compare, with throughput equal to Petals-style replay within noise and
+\NSbehindConsolPct\% below the best baseline; at 4,000 phones it is ahead on both
+(\PoolLargeVsConsolPct\% throughput against consolidation, \PoolLargeGBRatioCA$\times$ less traffic than cache-aware).
+Keeping warm standbys, the obvious remedy, cuts throughput by
+\StandbyDropPct\%. We release the simulator and a benchmark kit so that the
 assumed parameters can be replaced with measurements.
 \end{abstract}
 
@@ -95,11 +99,15 @@ is explicit and can be replaced by a measurement; we release a benchmark kit
 that produces those measurements on Android phones.
 \item NightShift (\S\ref{sec:design}), a placement and recovery design built on
 one observation from the simulator: once phones come and go, moving model
-shards costs more than redoing computation. Sticky shard ownership,
-lifetime-grouped pipelines and dawn consolidation cut shard downloads
-\GBRatioMin--\GBRatioMax$\times$ across every setting we tried, and the
-gain grows with pool size. Dedicated standbys, the standard remedy for
-preemption~\cite{bamboo}, make things worse.
+shards costs more than redoing computation. A permanent home block per phone,
+a short wait for a phone that holds the vacant block, and consolidation of
+broken pipelines cut data downloaded \GBRatioCA--\GBRatio$\times$ against
+every baseline at 1,000 phones, including a fair cache-aware one, and
+\CacheFullRatioCA$\times$ even when phones cache the whole model. Throughput matches replay within noise and is
+\NSbehindConsolPct\% below the best baseline at this size; NightShift's lead
+grows with the pool, and it trails at 500 phones. An ablation shows that
+neither the wait nor consolidation helps alone, and that dedicated standbys
+make things worse.
 \end{enumerate}
 
 We are explicit about what is and is not measured. All results here come from
@@ -163,16 +171,26 @@ volunteer GPUs and recovers from departures by routing around them and
 replaying the lost stage's cache; it is the baseline we call \emph{replay}.
 SWARM~\cite{swarm}, Learn\-ing\-@home~\cite{learningathome} and
 DiLoCo~\cite{diloco} train over unreliable or poorly connected nodes.
-SpotServe~\cite{spotserve} serves LLMs on preemptible cloud instances and
-Bamboo~\cite{bamboo} adds redundancy to survive preemption. Those nodes are
-GPUs with tens of gigabytes and minutes of warning; ours are phones with a few
-gigabytes and no warning.
+Deserve~\cite{deserve} studies decentralised serving on volunteer GPUs, and
+HexGen~\cite{hexgen} schedules LLM inference over heterogeneous, decentralised
+GPUs. SpotServe~\cite{spotserve} serves LLMs on preemptible cloud instances,
+migrating context when an instance is reclaimed. For training,
+Bamboo~\cite{bamboo} adds redundant computation and Oobleck~\cite{oobleck}
+keeps redundant pipeline templates to survive failures, and
+Parcae~\cite{parcae} predicts spot-instance availability to adapt
+parallelism proactively, the same idea as our lifetime grouping. Those nodes
+are GPUs with tens of gigabytes and, often, minutes of warning; ours are phones
+with a few gigabytes and no warning, and moving a shard to a replacement costs
+the volunteer data.
 
 \paragraph{Splitting models across nearby devices.}
 LinguaLinked~\cite{lingualinked} runs one LLM across several Android phones,
 Galaxy~\cite{galaxy} and EdgeShard~\cite{edgeshard} split transformers across
 edge devices, and exo~\cite{exo} does so for a household's laptops and phones;
-earlier, MoDNN~\cite{modnn} and DeepThings~\cite{deepthings} split CNNs. These
+prima.cpp~\cite{primacpp} runs 70B-class models on a home cluster of
+everyday devices; earlier, MoDNN~\cite{modnn} and DeepThings~\cite{deepthings}
+split CNNs, and CWC~\cite{cwc} scheduled jobs on the idle, charging phones of
+an organisation. These
 assume a small, stable set of devices. We study the opposite regime: a large
 pool in which membership changes all the time.
 
@@ -197,7 +215,9 @@ and keeps it in flash storage indefinitely. A pipeline stage is only ever
 filled by a phone whose home block matches; loading from flash takes seconds,
 whereas downloading 2.5\,GB over a residential link takes minutes and costs the
 owner data. If no matching phone is idle, the vacant stage waits up to five
-minutes before falling back to a phone that must download the block.
+minutes before falling back to a phone that must download the block; a
+pipeline whose stage has been vacant for ten minutes is dissolved and its
+phones return to the pool (this rule applies to every policy).
 Because the catalogue is fixed, the coordinator only needs to keep the 16
 home-block populations balanced.
 
@@ -215,11 +235,18 @@ nobody can fill. Waiting wastes every phone in those pipelines. When at least
 two pipelines are broken, NightShift dissolves the most damaged one (most
 vacancies, then least progress) and lends its phones, which already hold blocks
 of the same catalogue, to the others. A pool that shrinks keeps as many
-\emph{complete} pipelines as it can afford.
+\emph{complete} pipelines as it can afford. Because the donor's phones hold the
+blocks the survivors are missing, consolidation is also what keeps the wait
+short: without it, a vacant stage often waits for a home-block phone that is
+not coming.
 
 \paragraph{Recovery.} A replacement phone recomputes the KV cache of its block
-for the tokens processed so far (prefill is cheaper per token than decode), as
-in Petals; we compare this with restarting the batch.
+for the tokens processed so far, as in Petals. To do so it needs the input
+activations of its block for every token so far (prompt and generated). We
+assume the previous stage keeps them and sends them over the replacement's
+downlink, 16\,KiB per token per sequence (8,192 hidden dimensions in fp16);
+this transfer takes time and is counted as traffic for every policy. We
+compare replay with restarting the batch.
 
 \paragraph{What we chose not to do.} Keeping $k$ warm standbys per stage turns a
 failure into a fast swap but takes $k\times16$ phones out of service per
@@ -245,29 +272,51 @@ Flash read & 1\,GB/s\\
 Power & 4\,W computing, 1\,W waiting\\
 Night charging & 85\% of nights, start 23:00$\pm$1\,h, 7$\pm$1.5\,h\\
 Day charging & 1.5 sessions/day, median 35\,min, 60\% on Wi-Fi\\
+Flash cache & 1 block (2.5\,GB) per phone; \S\ref{sec:results} varies it to 16\\
+Activations & 16\,KiB per token per sequence, sent on repair\\
+Timers & home-block wait 300\,s; vacant pipeline dissolved after 600\,s\\
+Warm-up & 2 days run and discarded before measuring\\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The simulator advances in 10-second ticks over 24 hours from noon, after seven
-days of history used only to train the session-end predictor. Each phone has a
-RAM class, a per-layer decode time and a downlink speed drawn from
-Table~\ref{tab:params}, and a sequence of charging sessions drawn from the
-diurnal model, or read from a real trace. A pipeline's per-token latency is the
-sum of its stage times plus one hop per stage; its throughput is limited by
-$\max(\text{latency}, 16\cdot\max_i \text{stage}_i)$ per round, since 16
-micro-batches are in flight. A micro-batch of $b$ tokens costs
-$1+0.1(b-1)$ times a single token. We assume steady state: every phone already
-holds one block in flash from an earlier night, so day-one onboarding traffic
-is excluded for all policies alike. Results are means over \Seeds{} seeds with
-\NPhones{} phones; error bars show one standard deviation.
+The simulator advances in 10-second ticks. Each phone has a RAM class, a
+per-layer decode time and a downlink speed drawn from Table~\ref{tab:params},
+and a sequence of charging sessions drawn from the diurnal model, or read from
+a real trace. A pipeline's \emph{time per output token} is one round: the sum
+of its stage times plus one hop per stage. With 16 micro-batches in flight, a
+round is $\max(\text{latency}, 16\cdot\max_i \text{stage}_i)$ and produces one
+token for each of the 32 sequences. A micro-batch of $b$ tokens costs
+$1+0.1(b-1)$ times a single token, and prefill costs 1/8 of a decode token.
 
-We compare seven policies that differ only in placement and recovery:
-\emph{restart} and \emph{replay} (random placement, Petals-style replay),
-\emph{standby} (replay plus one standby per stage), and the three NightShift
-components alone (\emph{lifetime}, \emph{consolidate}, \emph{sticky}) and
-together (\emph{NightShift}). The upper bound places every available,
-eligible phone in a complete pipeline instantly.
+\paragraph{Steady state.} Seven days of synthetic history train the session-end
+predictor. The simulator then runs two days under the policy being evaluated
+and discards them, so that flash caches and pipelines reach that policy's own
+steady state, and finally measures 24 hours from noon. Every phone starts the
+warm-up holding one block (its home block), so a policy cannot look good merely
+by inheriting another's caches. Onboarding traffic, a phone's first download,
+is outside the measured window for every policy.
+
+\paragraph{Policies.} We compare ten policies that differ only in placement and
+recovery. The baselines are \emph{restart} and \emph{replay} (random placement;
+restart a broken batch, or replay its cache as Petals does);
+\emph{cache-aware}, a fair version of replay that fills each stage from idle
+phones already holding its block before falling back to any idle phone (it
+never waits); \emph{standby} (replay plus one warm standby per stage);
+\emph{lifetime} (replay with pipelines grouped by predicted session end); and
+\emph{consolidate} (replay plus consolidation). The NightShift ablation adds
+one part at a time: \emph{wait} (home blocks and the five-minute wait, random
+order), \emph{sticky} (plus lifetime grouping), \emph{NightShift without the
+wait} (sticky plus consolidation, falling back to a download at once) and
+\emph{NightShift}. The \emph{upper bound} places every available, eligible
+phone in a complete pipeline instantly and never loses work.
+
+\paragraph{Metrics and statistics.} Throughput is output tokens per second per
+1,000 phones in the pool. Traffic is gigabytes downloaded per million output
+tokens: shards plus repair activations. Results are means over \Seeds{} seeds
+with \NPhones{} phones (sweeps: 3 seeds); differences between policies are
+paired by seed, so both see the same phones and sessions, and we report them
+with 95\% $t$ confidence intervals.
 
 \section{Results}
 \label{sec:results}
@@ -291,68 +340,115 @@ system that drains a queue overnight.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/policies}
-\Description{Two horizontal bar charts comparing seven policies. Left: tokens per second per 1,000 phones, between about 68 and 121. Right: gigabytes downloaded per million tokens; NightShift is far lower than every other policy.}
-\caption{Throughput and shard traffic of the seven policies (1,000 phones,
-mean $\pm$ s.d.\ over \Seeds{} seeds).}
+\Description{Two horizontal bar charts comparing ten policies. Left: tokens per second per 1,000 phones, between 64 (replay with standby) and 115 (replay with consolidation); NightShift is 109. Right: gigabytes downloaded per million tokens, split into shards and activations; the baselines range from 296 to 610 and NightShift is 57.}
+\caption{Throughput and data downloaded (shards, dark; repair activations,
+light) of the ten policies (1,000 phones, mean $\pm$ s.d.\ over \Seeds{}
+seeds). The last four rows add NightShift's parts one at a time.}
 \label{fig:policies}
 \end{figure*}
 
 \paragraph{Moving shards, not lost work, is the cost of churn.}
-Figure~\ref{fig:policies} compares the policies. Restart and replay differ
-by only \RestartVsReplayPct\% in throughput, so the computation lost to
-departures is small. What separates the policies is data movement: under
-replay, every repair recruits whichever phone is idle, which rarely holds the
-needed block, and the pool downloads \GBReplay\,GB of weights for every
-million tokens it produces, enough to make a volunteer's monthly data cap the
-binding constraint.
+Figure~\ref{fig:policies} compares the policies. Restart differs from replay by only
+\RestartVsReplayPct\% ($\pm$\CIRepRestart{} tokens/s, 95\% CI),
+so little computation is lost to departures. What separates the policies is
+data movement. Under replay, a repair recruits whichever phone is idle, which
+rarely holds the needed block: the pool downloads \GBReplay\,GB per million
+tokens, of which \ShardReplay\,GB are shards. Preferring phones that already
+hold the block (cache-aware) helps less than one would expect, to \GBCA\,GB,
+because at a given moment the few idle phones seldom hold the right block; a
+serving phone still downloads about \PhoneGBCA\,GB a day, enough to make a
+volunteer's data plan the binding constraint.
 
-\paragraph{The components only work together.} Each part of NightShift alone
-is a poor trade. Sticky shards halve traffic (\GBSticky\,GB) but lose
-\StickyGainPct\% throughput, because a vacant stage now waits for a phone that
-holds its block. Lifetime grouping alone is worse than random
-(\TputLifetime{} tokens/s, \GBLifetime\,GB), because ranking phones by
-predicted stay overrides the reuse of cached blocks. Consolidation alone gives
-the highest throughput (\ConsolGainPct\%) but keeps traffic near replay's
-(\GBConsol\,GB). Combined, consolidation supplies the home-block phones that
-sticky repairs wait for: NightShift downloads \GBNS\,GB per million tokens
-(\GBRatio$\times$ less than replay), suffers \FailDropPct\% fewer stage
-failures, and delivers \TputNS{} tokens/s per 1,000 phones against
-\TputReplay{} for replay (+\TputGainPct\%). Its stages spend \UsefulNS\% of
-their time computing rather than waiting, against \UsefulReplay\%. If shard
-traffic were free, consolidation alone would be the better policy at this
-pool size; it is not free for the phones' owners.
+\paragraph{NightShift.} NightShift downloads \GBNS\,GB per million tokens:
+\GBRatio$\times$ less than replay, \GBRatioCA$\times$ less than cache-aware and
+\GBRatioConsol$\times$ less than consolidation; for shards alone the reduction
+against replay is \ShardRatio$\times$. A serving phone downloads about
+\PhoneGBNS\,GB a day instead of \PhoneGBReplay\,GB. Its throughput is
+\TputNS{} tokens/s per 1,000 phones against \TputReplay{} for replay, a paired
+difference of \DiffRepNS{} $\pm$ \CIRepNS, which is not significant. The best
+baseline, consolidation, is faster: \TputConsol{} tokens/s, a paired difference of
+\DiffConsNS{} $\pm$ \CIConsNS{} tokens/s, so NightShift is
+\NSbehindConsolPct\% behind it at this pool size. NightShift suffers \FailDropPct\% fewer stage failures than replay,
+and its stages spend \UsefulNS\% of their time computing rather than waiting,
+against \UsefulReplay\%. The trade is therefore a few percent of throughput
+at 1,000 phones for a large cut in the data volunteers must download.
+
+\paragraph{The ablation: the wait and consolidation need each other.}
+Giving each phone a home block and making vacant stages wait for it
+(\emph{wait}) cuts traffic only to \GBWait\,GB and changes throughput by
+\DiffRepWait{} $\pm$ \CIRepWait{} tokens/s against replay: in the morning,
+stages wait for home-block phones that have left for the day. Adding lifetime
+grouping changes little (\TputSticky{} tokens/s, \GBSticky\,GB). Adding
+consolidation but no wait (\emph{NightShift without the wait}) recovers some
+throughput but keeps traffic at \GBNSNoWait\,GB, because every vacancy still
+triggers a download. Only together does the design work: consolidation
+supplies home-block phones from dissolved pipelines, so the wait is usually
+short and usually rewarded. Lifetime grouping alone, without home blocks, is
+worse than random (\TputLifetime{} tokens/s, \GBLifetime\,GB), because ranking
+phones by predicted stay overrides any chance of reusing a cached block.
 
 \paragraph{Standbys are a bad trade on phones.} One standby per stage cuts
 throughput by \StandbyDropPct\%: it removes half of the pool from service to
-protect pipelines whose expected lifetime, at night, is hours. Standbys pay off
-when failures are frequent relative to the cost of idling capacity, which is
-the case for preemptible cloud GPUs~\cite{bamboo} but not here.
+protect pipelines whose expected lifetime, at night, is hours. Redundancy pays
+off when failures are frequent relative to the cost of idling capacity, as for
+preemptible cloud GPUs~\cite{bamboo,oobleck}, but not here.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/tradeoff}
+\Description{Left: line chart of gigabytes downloaded per million tokens against the number of blocks a phone may cache (1, 2, 4, 16). Replay, cache-aware and consolidate fall from about 400 to about 200; NightShift stays near 40 to 55. Right: throughput against traffic on a log axis. NightShift's points for waits of 0 to 600 seconds trace a curve from about 99 tokens per second at 314 GB to about 108 at 45 GB; square markers show replay, cache-aware and consolidate at 360 to 410 GB.}
+\caption{Left: traffic when each phone may cache more blocks. Right: throughput
+against traffic; NightShift's wait time (0--600\,s) traces a trade-off, squares
+are baselines.}
+\label{fig:tradeoff}
+\end{figure}
+
+\paragraph{Larger caches do not close the gap.} One might expect the baselines
+to catch up if phones simply kept more blocks in flash. Figure~\ref{fig:tradeoff}
+(left) varies the cache from one block to all 16 (the whole 40\,GB model).
+Baseline traffic roughly halves (replay \CacheFullReplay, cache-aware
+\CacheFullCA, consolidation \CacheFullConsol\,GB per million tokens with a
+full cache) while NightShift falls to \CacheFullNS\,GB, still
+\CacheFullRatioCA$\times$ less than cache-aware. Keeping 40\,GB on a
+volunteer's phone is, in any case, a large request; we assume one block.
+
+\paragraph{The wait is a knob.} Figure~\ref{fig:tradeoff} (right) varies how
+long a vacant stage waits for a home-block phone. With no wait, NightShift is
+the no-wait ablation above (\WaitZeroTput{} tokens/s, \WaitZeroGB\,GB). A
+60-second wait already gives \WaitSixtyTput{} tokens/s at \WaitSixtyGB\,GB,
+and 600\,s gives \WaitTenTput{} tokens/s at \WaitTenGB\,GB. Throughput is
+nearly flat beyond a minute while traffic keeps falling, so an operator can
+choose the point that suits the volunteers' data plans.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figures/scale}
-\Description{Two line charts against pool size from 500 to 4,000 phones. Left: replay throughput stays flat while NightShift rises above it from about 1,000 phones. Right, log scale: replay downloads stay near 350 GB per million tokens while NightShift falls to a few GB.}
-\caption{NightShift improves with pool size; replay does not. Shard traffic is
-on a logarithmic scale.}
+\Description{Two line charts against pool size from 500 to 4,000 phones for replay, cache-aware, consolidate and NightShift. Left: the three baselines stay flat between about 108 and 119 tokens per second per 1,000 phones, while NightShift rises from about 98 to 127, crossing consolidate near 2,000 phones. Right, log scale: the baselines stay between about 330 and 430 GB per million tokens while NightShift falls from about 160 to 35.}
+\caption{NightShift improves with pool size; the baselines do not. Traffic
+(shards plus activations) is on a logarithmic scale.}
 \label{fig:scale}
 \end{figure}
 
 \paragraph{NightShift gets better with scale.} With more phones, each block
-has more idle owners to choose from, so a sticky repair almost never has to
-wait or download (Figure~\ref{fig:scale}). From 500 to 4,000 phones,
+has more idle owners to choose from, so a vacant stage rarely waits long or
+falls back to a download (Figure~\ref{fig:scale}). From 500 to 4,000 phones,
 NightShift's throughput rises from \SwPoolLoNS{} to \SwPoolHiNS{} tokens/s per
 1,000 phones and its traffic falls from \PoolSmallGBNS{} to
-\PoolLargeGBNS\,GB per million tokens, while replay stays flat
-(\SwPoolLoReplay{} to \SwPoolHiReplay{}) and its traffic grows. At 500 phones,
-NightShift is \PoolSmallGainPct\% behind replay in throughput; at 4,000 it is
-\PoolLargeGainPct\% ahead with \PoolLargeGBRatio$\times$ less traffic. This is
-the regime that matters: a deployment worth building has far more than 4,000
-phones.
+\PoolLargeGBNS\,GB per million tokens, while the baselines stay roughly flat
+(replay \SwPoolLoReplay{} to \SwPoolHiReplay, consolidation
+\SwPoolLoConsol{} to \SwPoolHiConsol). At 500 phones NightShift is worse:
+\PoolSmallGainPct\% against replay and \PoolSmallVsConsolPct\% against
+consolidation, with only \PoolSmallGBRatio$\times$ less traffic. At 4,000 it is
+\PoolLargeGainPct\% against replay and \PoolLargeVsConsolPct\% against
+consolidation, with \PoolLargeGBRatio$\times$ less traffic than replay. A
+deployment worth building would have far more than 4,000 phones, but we have
+not simulated beyond that, and a large pool would likely be split by region
+(below), which brings each region back toward smaller pools.
 
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{figures/sweeps}
-\Description{Six small line charts of throughput for replay and NightShift as one assumption varies: prefill cost, daytime session length, share of phones charging at night, sequences per pipeline, hop latency and pool size. The two policies track each other closely in most panels.}
+\Description{Six small line charts of throughput for replay and NightShift as one assumption varies: prefill cost ratio, daytime session length, share of phones charging at night, sequences per pipeline, hop latency and pool size. The two policies track each other closely in most panels; NightShift pulls ahead at large pools and when most phones charge every night.}
 \caption{Sensitivity of throughput to the main assumptions, replay vs.\
 NightShift (1,000 phones, mean of 3 seeds).}
 \label{fig:sweeps}
@@ -364,21 +460,25 @@ NightShift's throughput from \SwNightLoNS{} to \SwNightHiNS{} tokens/s per
 1,000 phones between 50\% and 100\% of nights (at 50\%, replay is slightly
 ahead). The batch size moves it from \SwBatchLoNS{} (16 sequences) to
 \SwBatchHiNS{} (48), because more sequences keep more stages busy; memory for
-the KV cache caps this. The relative cost of prefill moves it from
-\SwPrefillLoNS{} to \SwPrefillHiNS, since every repair replays the prompt.
+the KV cache caps this. The cost ratio of decode to prefill moves it from
+\SwPrefillLoNS{} (ratio 2) to \SwPrefillHiNS{} (ratio 32): the prompt of every
+batch is processed once per stage, and each repair recomputes the cache of all
+tokens so far.
 Longer daytime sessions help only modestly (\SwDayDurLoNS{} to
 \SwDayDurHiNS), confirming that the night carries the system. Hop latency
 sets per-token latency (Figure~\ref{fig:latency}: \LatLAN\,s at 5\,ms,
 \LatWAN\,s at 60\,ms, \LatSlow\,s at 120\,ms) and, because a round cannot be
 shorter than one token's trip, also throughput (\SwHopLoNS{} to \SwHopHiNS).
 Grouping pipelines by region, so that hops stay short, is therefore worth more
-than any scheduling refinement. Across every setting, NightShift downloads
-\GBRatioMin--\GBRatioMax$\times$ less than replay.
+than any scheduling refinement. Across every setting we tried, NightShift
+downloads \GBRatioMin--\GBRatioMax$\times$ less than replay, the low end at
+500 phones; its throughput stays within a few percent of replay's except at
+500 phones and at 50\% of nights, where it is behind.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.92\columnwidth]{figures/latency}
-\Description{Line chart of median time per output token against one-way hop latency from 5 to 120 ms; it rises roughly linearly from about 1.3 s to 3.2 s and is the same for both policies.}
+\Description{Line chart of median time per output token against one-way hop latency from 5 to 120 ms; it rises from about 2.0 s to 3.2 s and is the same for both policies.}
 \caption{Median time per output token against one-way hop latency.}
 \label{fig:latency}
 \end{figure}
@@ -401,8 +501,10 @@ same and on different networks.
 1--4 phones, validating the latency model (sum of stage times plus hops).
 \item \textbf{Availability.} A logger records charging and Wi-Fi state every
 five minutes for 14 days on volunteers' phones; the trace replaces the
-synthetic diurnal model. Large published traces~\cite{yang2021heterogeneity}
-are an alternative.
+synthetic diurnal model. Volunteers give
+informed consent, the logger records no content, location or identifiers
+beyond a random ID, and it can be removed at any time. Large published
+traces~\cite{yang2021heterogeneity} are an alternative.
 \end{itemize}
 This version reports simulation results only. A later version will replace
 Table~\ref{tab:params} with the measured values and repeat every experiment
@@ -424,19 +526,26 @@ temperature; the federated learning eligibility rule is a minimum, not a
 licence. We have not modelled incentives.
 \paragraph{Model fidelity.} The simulator ignores stragglers within a stage,
 thermal throttling over a night, Wi-Fi contention in one home, and iOS's
-stricter background limits. Shard downloads are counted, not simulated as
-competing traffic.
+stricter background limits. Downloads are counted and delay the stage that
+waits for them, but do not compete with other traffic on a link. Time
+advances in 10-second ticks, which coarsens short events. Each result comes
+from one synthetic 24-hour window per seed after warm-up, from a synthetic
+availability model; real traces may have more correlated departures (for
+example, everyone unplugging at 07:00 on a weekday) than ours.
 
 \section{Conclusion}
 
 A pool of charging phones can, in principle, run a model far larger than any
-phone, but only as an overnight batch system with seconds of latency per token
-and far more memory traffic per token than a GPU. Within that regime, the decisive design
-choice is to keep model shards where they are: sticky ownership, pipelines of
-phones that leave together and consolidation at dawn remove most shard traffic
-without losing throughput, and the benefit grows with the pool, while
-standbys hurt. The next step is to replace
-our assumptions with measurements from real phones and real owners.
+phone, but only as an overnight batch system with seconds per output token
+and far more memory traffic per token than a GPU. Within that regime, the cost
+that matters most to the volunteers is data: replacing leavers moves model
+shards, and even a cache-aware design moves several gigabytes per phone per
+day. Giving each phone a permanent home block, waiting briefly for a phone that
+holds it, and consolidating broken pipelines cut that traffic
+\GBRatioCA--\GBRatio$\times$ in our simulation, at a few percent of throughput
+at 1,000 phones and a gain at 4,000; standbys hurt. These results rest on
+assumed parameters. The next step is to replace them with measurements from
+real phones and real owners.
 \ifdefined\arxiv
 The simulator, results and benchmark kit are available at
 \url{https://github.com/aidinb/nightshift-phone-llm}.

@@ -23,6 +23,8 @@
   "batch_alpha": 0.1,
   "hop_latency_s": 0.06,
   "flash_load_gbps": 8.0,
+  "cache_blocks": 1,
+  "hidden_bytes_per_token": 16384,
   "dl_median_mbps": 50.0,
   "dl_sigma": 0.6,
   "phone_classes": [
@@ -69,7 +71,9 @@
   "consolidate": true,
   "standbys": 0,
   "sticky_fallback_s": 300.0,
+  "lifetime_order": true,
   "eval_start_h": 12.0,
-  "eval_hours": 24.0
+  "eval_hours": 24.0,
+  "warmup_days": 2
  }
 }

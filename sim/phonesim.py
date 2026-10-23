@@ -11,14 +11,17 @@ Policies compared (all share the same fixed shard catalogue and per-phone
 shard cache, so the comparison isolates placement and recovery; see POLICIES):
 
   restart      random placement; a departure loses every in-flight sequence
-  replay       random placement; a departure is repaired by recruiting a new
-               phone and replaying the lost stage's KV cache (Petals-style)
+  replay       random groups of phones; a departure is repaired by recruiting
+               a new phone and replaying the lost stage's KV cache
+  cacheaware   replay, but each pipeline is formed from phones that already
+               cache its blocks (the fair, cache-aware baseline)
   standby      replay + one dedicated warm standby per stage
   lifetime     replay + pipelines formed from phones with similar predicted
                session end, so one short-lived member does not end a pipeline
   consolidate  replay + a damaged pipeline donates its phones to repair others
-  sticky       replay + each phone keeps a home block (no re-download) and
-               repairs wait briefly for a phone that already holds the block
+  wait         cacheaware + a fixed home block per phone, and repairs wait
+               briefly for a phone that already holds the block
+  sticky       wait + lifetime grouping
   nightshift   sticky + consolidate (the design proposed in the paper)
 
 Measured parameters: set PHONESIM_PARAMS=path/to/params.json (written by
@@ -64,6 +67,8 @@ class Config:
     # network
     hop_latency_s: float = 0.060     # WAN; use 0.005 for a single LAN
     flash_load_gbps: float = 8.0     # Gbit/s reading a cached shard from local flash (1 GB/s)
+    cache_blocks: int = 1            # blocks a phone may keep in flash (volunteer storage quota)
+    hidden_bytes_per_token: int = 16384  # fp16 activation entering a stage (hidden size 8192)
     dl_median_mbps: float = 50.0
     dl_sigma: float = 0.6
 
@@ -96,8 +101,11 @@ class Config:
     consolidate: bool = True         # donate phones of the most damaged pipeline
     standbys: int = 0                # dedicated warm standbys per stage
     sticky_fallback_s: float = 300.0 # sticky: wait this long for a home-block phone before downloading
+    lifetime_order: bool = True      # sticky: order phones by predicted stay (False = random)
     eval_start_h: float = 12.0       # evaluate a 24 h window starting at noon
     eval_hours: float = 24.0
+    warmup_days: int = 2             # run this long first and discard it, so caches and
+                                     # pipelines reach the policy's own steady state
     sessions_override: Optional[Dict[int, List[Tuple[float, float]]]] = None
 
 
@@ -107,8 +115,13 @@ POLICIES = {
     "standby":    dict(placement="random",   recovery="replay",  consolidate=False, standbys=1),
     "lifetime":   dict(placement="lifetime", recovery="replay",  consolidate=False, standbys=0),
     "consolidate": dict(placement="random",  recovery="replay",  consolidate=True,  standbys=0),
+    "cacheaware": dict(placement="cache",    recovery="replay",  consolidate=False, standbys=0),
+    "wait":       dict(placement="sticky",   recovery="replay",  consolidate=False, standbys=0,
+                       lifetime_order=False),
     "sticky":     dict(placement="sticky",   recovery="replay",  consolidate=False, standbys=0),
     "nightshift": dict(placement="sticky",   recovery="replay",  consolidate=True,  standbys=0),
+    "nightshift_nowait": dict(placement="sticky", recovery="replay", consolidate=True,
+                              standbys=0, sticky_fallback_s=0.0),
 }
 
 
@@ -123,7 +136,7 @@ class Phone:
     ms_per_layer: float
     dl_mbps: float
     sessions: List[Tuple[float, float]]
-    cached_block: Optional[int] = None
+    cached: List[int] = field(default_factory=list)  # blocks in flash, most recent first
     home_block: int = 0
     role: str = "idle"               # idle | stage | standby | loading
     pipe: Optional[int] = None
@@ -187,7 +200,7 @@ def load_sessions_csv(path: str) -> Dict[int, List[Tuple[float, float]]]:
 
 
 def make_phones(cfg: Config, rng: random.Random) -> List[Phone]:
-    days = cfg.history_days + 3
+    days = cfg.history_days + cfg.warmup_days + 3
     phones = []
     weights = [c[1] for c in cfg.phone_classes]
     override = list(cfg.sessions_override.values()) if cfg.sessions_override else None
@@ -254,14 +267,15 @@ class Sim:
         self.phones = make_phones(cfg, self.rng)
         self.t0 = (cfg.history_days * 24 + cfg.eval_start_h) * HOUR
         self.t1 = self.t0 + cfg.eval_hours * HOUR
-        self.pred = Predictor(self.phones, self.t0)
+        self.t_start = self.t0 - cfg.warmup_days * DAY
+        self.pred = Predictor(self.phones, self.t_start)  # trained on history only
         self.n_blocks = math.ceil(cfg.n_layers / cfg.block_layers)
         # Steady state: every phone already holds one block in flash from an
         # earlier night. Blocks are spread evenly over eligible phones; a
         # sticky policy keeps each phone on that "home" block for good.
         for i, p in enumerate(self.phones):
             p.home_block = i % self.n_blocks
-            p.cached_block = p.home_block
+            p.cached = [p.home_block]
         self.block_gb = cfg.block_layers * cfg.layer_gb
         seq_tokens = cfg.prompt_tokens + cfg.output_tokens
         self.kv_gb = (cfg.batch_seqs * seq_tokens * cfg.block_layers
@@ -270,13 +284,20 @@ class Sim:
         self.work_per_seq = cfg.prompt_tokens / cfg.prefill_efficiency + cfg.output_tokens
         self.pipes: Dict[int, Pipeline] = {}
         self.next_pipe = 0
-        self.use_place = cfg.placement in ("lifetime", "sticky")
+        self.use_place = (cfg.placement == "lifetime"
+                          or (cfg.placement == "sticky" and cfg.lifetime_order))
         self.sticky = cfg.placement == "sticky"
+        self.cache_form = cfg.placement == "cache"
+        self.act_bytes = 0.0
+        self.served = set()
+        self.tok_time_samples: List[float] = []
+        self._seen = 0
+        self._srng = random.Random(cfg.seed + 7919)   # sampling only; never perturbs the run
         self.k = cfg.standbys
         self.bytes_downloaded = 0.0
         self.consolidations = 0
         self.oracle_pipe_seconds = 0.0
-        self.loss = {"load": 0.0, "replay": 0.0, "vacant": 0.0, "form": 0.0}
+        self.loss = {"load": 0.0, "replay": 0.0, "transfer": 0.0, "vacant": 0.0, "form": 0.0}
         # metrics
         self.delivered_tokens = 0.0
         self.lost_work = 0.0
@@ -306,7 +327,7 @@ class Sim:
                 if p.role == "idle" and self.eligible(p) and self.available(p, t)]
 
     def load_time(self, p: Phone, block: int) -> float:
-        if p.cached_block == block:
+        if block in p.cached:
             return self.block_gb * 8 / self.cfg.flash_load_gbps
         return self.block_gb * 8000 / p.dl_mbps
 
@@ -332,16 +353,20 @@ class Sim:
             return None
         window = ranked[: max(1, len(ranked) // 4)] if self.use_place else ranked
         for i, p in enumerate(window):
-            if p.cached_block == block:
+            if block in p.cached:
                 return ranked.pop(ranked.index(p))
         return ranked.pop(0)
 
     def assign(self, p: Phone, role: str, pipe: int, block: int, t: float) -> float:
         p.role, p.pipe = role, pipe
         lt = self.load_time(p, block)
-        if p.cached_block != block:
+        self.served.add(p.pid)
+        if block in p.cached:
+            p.cached.remove(block)
+        else:
             self.bytes_downloaded += self.block_gb
-        p.cached_block = block
+        p.cached.insert(0, block)
+        del p.cached[max(1, self.cfg.cache_blocks):]
         return t + lt
 
     def release(self, pid: int):
@@ -363,17 +388,30 @@ class Sim:
         # each round advances every sequence by one decode-equivalent unit
         return 1.0 / round_time, tok_latency
 
+    def done_tokens(self, pl: Pipeline) -> float:
+        cfg = self.cfg
+        return cfg.prompt_tokens + max(
+            0.0, pl.progress - cfg.prompt_tokens / cfg.prefill_efficiency)
+
     def replay_time(self, pl: Pipeline, p: Phone) -> float:
         cfg = self.cfg
-        done_tokens = cfg.prompt_tokens + max(
-            0.0, pl.progress - cfg.prompt_tokens / cfg.prefill_efficiency)
         per_tok = cfg.block_layers * p.ms_per_layer / 1000 / cfg.prefill_efficiency
-        return cfg.batch_seqs * done_tokens * per_tok
+        return cfg.batch_seqs * self.done_tokens(pl) * per_tok
+
+    def replay_transfer(self, pl: Pipeline, p: Phone) -> Tuple[float, float]:
+        """(seconds, GB) to send the replacement the stage's input activations
+        for every token so far, so it can rebuild the lost KV cache. They come
+        from the upstream stage over the WAN; the replacement's download link
+        is taken as the bottleneck."""
+        gb = self.cfg.batch_seqs * self.done_tokens(pl) * self.cfg.hidden_bytes_per_token / 1e9
+        return gb * 8000 / p.dl_mbps, gb
 
     # ---- scheduler actions
     def form_pipelines(self, t: float):
         if self.sticky:
             return self.form_sticky(t)
+        if self.cache_form:
+            return self.form_cached(t)
         ranked = self.rank(self.idle_pool(t), t)
         per_pipe = self.n_blocks * (1 + self.k)
         while len(ranked) >= per_pipe:
@@ -396,6 +434,44 @@ class Sim:
                     sb.append(p.pid)
                 standbys.append(sb)
             self.pipes[pid] = Pipeline(pid, stages, standbys, ready, 0.0, max(ready))
+            self.loss["form"] += max(ready) - t
+
+    def form_cached(self, t: float):
+        """Cache-aware baseline: form as many pipelines as the idle pool
+        allows; first give every pipeline phones that already cache each of
+        its blocks (random order, no availability prediction), then fill the
+        remaining stages from the leftover phones, which download. Nobody
+        waits."""
+        pool = self.rank(self.idle_pool(t), t)
+        n_pipes = len(pool) // self.n_blocks
+        if n_pipes == 0:
+            return
+        used = set()
+        slots = [[None] * self.n_blocks for _ in range(n_pipes)]
+        buckets: List[List[Phone]] = [[] for _ in range(self.n_blocks)]
+        for p in pool:
+            for b in p.cached:
+                buckets[b].append(p)
+        for b in range(self.n_blocks):
+            it = iter(buckets[b])
+            for i in range(n_pipes):
+                for p in it:
+                    if p.pid not in used:
+                        slots[i][b] = p
+                        used.add(p.pid)
+                        break
+        rest = [p for p in pool if p.pid not in used]
+        for i in range(n_pipes):
+            pid = self.next_pipe
+            self.next_pipe += 1
+            stages, ready = [], []
+            for b in range(self.n_blocks):
+                p = slots[i][b] or rest.pop(0)
+                ready.append(self.assign(p, "stage", pid, b, t))
+                stages.append(p.pid)
+            self.pipes[pid] = Pipeline(pid, stages, [[] for _ in range(self.n_blocks)],
+                                       ready, 0.0, max(ready))
+            self.loss["form"] += max(ready) - t
 
     def form_sticky(self, t: float):
         """One pipeline per complete set of home blocks. Each block's idle
@@ -471,8 +547,11 @@ class Sim:
             self.loss["load"] += ready - t
             if self.cfg.recovery == "replay":
                 rt = self.replay_time(pl, p)
-                ready += rt
+                xt, xgb = self.replay_transfer(pl, p)
+                self.act_bytes += xgb
+                ready += xt + rt
                 self.loss["replay"] += rt
+                self.loss["transfer"] += xt
             pl.stalled_until = max(pl.stalled_until, ready)
 
     def dissolve(self, pid: int):
@@ -542,11 +621,27 @@ class Sim:
                 del self.pipes[pid]
                 del self._vacant_since[pid]
 
+    def _reset_metrics(self):
+        """End of warm-up: keep the system state, zero every counter."""
+        self.bytes_downloaded = self.act_bytes = 0.0
+        self.consolidations = self.failures = self.standby_swaps = 0
+        self.oracle_pipe_seconds = self.delivered_tokens = self.lost_work = 0.0
+        self.stage_seconds_running = self.stage_seconds_stalled = 0.0
+        self.pipe_seconds_running = 0.0
+        self.loss = {k: 0.0 for k in self.loss}
+        self.latency_samples, self.tok_time_samples, self._seen = [], [], 0
+        self.served = {p.pid for p in self.phones if p.role != "idle"}
+        self.timeline = []
+
     # ---- main loop
     def run(self) -> dict:
         cfg = self.cfg
-        t = self.t0
+        t = self.t_start
+        measuring = cfg.warmup_days == 0
         while t < self.t1:
+            if not measuring and t >= self.t0:
+                self._reset_metrics()
+                measuring = True
             self.handle_departures(t)
             if cfg.consolidate:
                 self.consolidate(t)
@@ -561,8 +656,16 @@ class Sim:
                     pl.progress += rate * cfg.tick_s
                     running += 1
                     self.stage_seconds_running += self.n_blocks * cfg.tick_s
-                    if len(self.latency_samples) < 200000:
+                    # uniform reservoir sample over all running pipeline-ticks
+                    self._seen += 1
+                    if len(self.latency_samples) < 50000:
                         self.latency_samples.append(lat)
+                        self.tok_time_samples.append(1.0 / rate)
+                    else:
+                        j = self._srng.randrange(self._seen)
+                        if j < 50000:
+                            self.latency_samples[j] = lat
+                            self.tok_time_samples[j] = 1.0 / rate
                     while pl.progress >= self.work_per_seq:
                         pl.progress -= self.work_per_seq
                         self.delivered_tokens += cfg.batch_seqs * cfg.output_tokens
@@ -575,19 +678,25 @@ class Sim:
             avail = sum(1 for p in self.phones if self.available(p, t) and self.eligible(p))
             # oracle: every eligible available phone in a complete pipeline, instantly
             self.oracle_pipe_seconds += (avail // self.n_blocks) * cfg.tick_s
-            if int((t - self.t0) // cfg.tick_s) % 30 == 0:
+            if t >= self.t0 and int((t - self.t0) // cfg.tick_s) % 30 == 0:
                 self.timeline.append(((t - self.t0) / HOUR, avail, running,
                                       self.delivered_tokens))
             t += cfg.tick_s
         secs = cfg.eval_hours * HOUR
         busy = self.stage_seconds_running + self.stage_seconds_stalled
         lat = sorted(self.latency_samples)
+        tok = sorted(self.tok_time_samples)
         return {
             "policy": cfg.policy,
             "loss_pipe_s": dict(self.loss),
             "consolidations": self.consolidations,
             "gb_downloaded": self.bytes_downloaded,
             "gb_per_mtoken": self.bytes_downloaded / max(1.0, self.delivered_tokens) * 1e6,
+            "act_gb_per_mtoken": self.act_bytes / max(1.0, self.delivered_tokens) * 1e6,
+            "total_gb_per_mtoken": (self.bytes_downloaded + self.act_bytes)
+                                   / max(1.0, self.delivered_tokens) * 1e6,
+            "gb_per_serving_phone": (self.bytes_downloaded + self.act_bytes)
+                                    / max(1, len(self.served)),
             "oracle_pipe_frac": self.pipe_seconds_running / max(1.0, self.oracle_pipe_seconds),
             "standbys": self.k,
             "seed": cfg.seed,
@@ -598,10 +707,11 @@ class Sim:
             "tokens_per_s_per_1k_phones": self.delivered_tokens / secs * 1000 / cfg.n_phones,
             "failures": self.failures,
             "standby_swaps": self.standby_swaps,
-            "lost_tokens_equiv": self.lost_work,
+            "lost_work_units": self.lost_work,   # decode-token equivalents (prefill = 1/8)
             "useful_stage_frac": self.stage_seconds_running / busy if busy else 0.0,
             "mean_running_pipes": self.pipe_seconds_running / secs,
-            "token_latency_p50_s": lat[len(lat) // 2] if lat else float("nan"),
+            "pass_latency_p50_s": lat[len(lat) // 2] if lat else float("nan"),
+            "token_time_p50_s": tok[len(tok) // 2] if tok else float("nan"),
             "eligible_frac": sum(self.eligible(p) for p in self.phones) / len(self.phones),
             "timeline": self.timeline,
         }
