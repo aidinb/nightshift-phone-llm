@@ -20,19 +20,20 @@ THREADS=${THREADS:-$(nproc)}
   done ) > "$OUT/battery.log" &
 SAMPLER=$!
 trap 'kill $SAMPLER 2>/dev/null || true' EXIT
-echo "writing to $OUT (about 45 min; quiet while it runs)"
+step() { echo "$(date +%H:%M) $*" | tee -a "$OUT/progress.txt"; }
+step "started; writing to $OUT (about 45 min). Check any time: bash status.sh"
 for b in 1 2 4 8; do
-  echo "$(date +%H:%M) speed test, batch $b of 1 2 4 8"
+  step "speed test, batch $b of 1 2 4 8"
   ~/llama.cpp/build/bin/llama-bench -m ~/models/model.gguf -t "$THREADS" \
      -p 512 -n 128 -b 512 -ub "$b" -o json > "$OUT/bench_ub$b.json" || true
 done
-echo "$(date +%H:%M) batching test"
+step "batching test"
 # batching cost: time per decode step with 1..8 sequences in flight
 ~/llama.cpp/build/bin/llama-batched-bench -m ~/models/model.gguf -t "$THREADS" \
    -c 4096 -npp 128 -ntg 64 -npl 1,2,4,8 --output-format jsonl \
    | grep '^{' > "$OUT/batched.jsonl" || true
-echo "$(date +%H:%M) 10-minute sustained run"
+step "10-minute sustained run"
 # sustained run (thermal throttling): 10 minutes of decode
 timeout 600 ~/llama.cpp/build/bin/llama-bench -m ~/models/model.gguf -t "$THREADS" \
    -p 0 -n 2048 -r 20 -o json > "$OUT/bench_sustained.json" || true
-echo "results in $OUT"
+step "DONE. results in $OUT. Next: bash collect.sh"
