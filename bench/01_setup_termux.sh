@@ -4,7 +4,7 @@
 set -euo pipefail
 # Full upgrade: a bare `pkg update` leaves old libraries (libc++) behind, and the
 # freshly installed cmake then fails with "CANNOT LINK EXECUTABLE".
-yes | pkg upgrade -y
+pkg upgrade -y -o Dpkg::Options::=--force-confnew
 pkg install -y git cmake clang make wget iperf3 termux-api python
 termux-setup-storage || true
 cd ~
