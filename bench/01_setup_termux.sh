@@ -10,6 +10,12 @@ termux-setup-storage || true
 cd ~
 [ -d llama.cpp ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp
 cd llama.cpp
+# 32-bit ARM phones: clang 21's arm_neon.h now defines vcvtnq_s32_f32, which
+# clashes with ggml's own 32-bit fallback. Rename ggml's copy (idempotent).
+IMPL=ggml/src/ggml-cpu/ggml-cpu-impl.h
+if [ "$(uname -m)" != aarch64 ] && ! grep -q ggml_vcvtnq_s32_f32 "$IMPL"; then
+  sed -i 's/^inline static int32x4_t vcvtnq_s32_f32(float32x4_t v) {/#define vcvtnq_s32_f32 ggml_vcvtnq_s32_f32\ninline static int32x4_t ggml_vcvtnq_s32_f32(float32x4_t v) {/' "$IMPL"
+fi
 cmake -B build -DGGML_RPC=ON -DLLAMA_CURL=OFF
 cmake --build build --config Release -j"${JOBS:-$(nproc)}" --target llama-bench llama-batched-bench llama-cli rpc-server
 mkdir -p ~/models && cd ~/models
