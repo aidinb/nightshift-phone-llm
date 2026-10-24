@@ -10,7 +10,11 @@ getprop > "$OUT/getprop.txt"
 cat /proc/meminfo > "$OUT/meminfo.txt"
 THREADS=${THREADS:-$(nproc)}
 ( while true; do
-    s=$(termux-battery-status)
+    # timeout: termux-battery-status hangs forever if Termux:API is not set up;
+    # the sysfs fallback works on phones that leave it readable.
+    s=$(timeout 5 termux-battery-status 2>/dev/null || \
+        for f in capacity temp current_now voltage_now status; do
+          printf '%s=%s ' "$f" "$(cat /sys/class/power_supply/battery/$f 2>/dev/null)"; done)
     echo "$(date +%s.%N) $s" | tr -d '\n'; echo
     sleep 1
   done ) > "$OUT/battery.log" &
