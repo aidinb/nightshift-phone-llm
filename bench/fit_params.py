@@ -46,8 +46,11 @@ def device(dirpath, n_layers_bench, layer_ratio):
                 gen_ts.append(r["avg_ts"])
             elif r.get("n_prompt", 0) > 0 and r.get("n_gen", 0) == 0:
                 pp_ts.append((r.get("n_ubatch"), r["avg_ts"]))
-    sustained = [r["avg_ts"] for r in load_json_any(os.path.join(dirpath, "bench_sustained.json"))
-                 if r.get("n_gen", 0) > 0] if os.path.exists(os.path.join(dirpath, "bench_sustained.json")) else []
+    sustained = []
+    for name in ("bench_sustained.jsonl", "bench_sustained.json"):
+        f = os.path.join(dirpath, name)
+        if os.path.exists(f):
+            sustained += [r["avg_ts"] for r in load_json_any(f) if r.get("n_gen", 0) > 0]
     out = {"dir": dirpath, "ram_gb": round(ram_gb, 1)}
     if gen_ts:
         tg = statistics.median(gen_ts)
