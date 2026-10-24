@@ -2,7 +2,9 @@
 # Run inside Termux (F-Droid build) on each Android phone.
 # Installs llama.cpp, iperf3 and termux-api, and downloads the benchmark model.
 set -euo pipefail
-pkg update -y
+# Full upgrade: a bare `pkg update` leaves old libraries (libc++) behind, and the
+# freshly installed cmake then fails with "CANNOT LINK EXECUTABLE".
+yes | pkg upgrade -y
 pkg install -y git cmake clang make wget iperf3 termux-api python
 termux-setup-storage || true
 cd ~
