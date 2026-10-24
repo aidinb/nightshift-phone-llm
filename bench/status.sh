@@ -8,8 +8,9 @@ echo "--- progress"; tail -n 5 "$D/progress.txt" 2>/dev/null || echo "(old scrip
 echo "--- files"; ls -l "$D"
 echo "--- last battery sample"; tail -n 1 "$D/battery.log" 2>/dev/null | cut -c1-200
 echo "--- running now"
-if pgrep -f 'llama-(bench|batched-bench)' >/dev/null; then
-  echo "YES: benchmark is running"; ps -eo pid,etime,pcpu,rss,args | grep -E 'llama-(bench|batched)' | grep -v grep | cut -c1-120
+P=$(ps -e -o pid,etime,args 2>/dev/null | grep -E 'llama-(bench|batched)' | grep -v grep)
+if [ -n "$P" ]; then
+  echo "YES: benchmark is running"; echo "$P" | cut -c1-120
 else
   echo "NO benchmark process running"
 fi
