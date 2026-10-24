@@ -3,7 +3,7 @@
 This measures an actual model split across 2 to 4 phones, to validate the
 simulator's latency model (sum of stage times + one network hop per stage).
 
-1. On every phone: `~/llama.cpp/build/bin/rpc-server -H 0.0.0.0 -p 50052`
+1. On every phone: `~/llama.cpp/build/bin/ggml-rpc-server -H 0.0.0.0 -p 50052`
 2. On a laptop on the same Wi-Fi, with llama.cpp built with `-DGGML_RPC=ON`:
 
        ./build/bin/llama-bench -m Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf \

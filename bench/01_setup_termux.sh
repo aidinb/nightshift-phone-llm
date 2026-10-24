@@ -17,7 +17,7 @@ if [ "$(uname -m)" != aarch64 ] && ! grep -q ggml_vcvtnq_s32_f32 "$IMPL"; then
   sed -i 's/^inline static int32x4_t vcvtnq_s32_f32(float32x4_t v) {/#define vcvtnq_s32_f32 ggml_vcvtnq_s32_f32\ninline static int32x4_t ggml_vcvtnq_s32_f32(float32x4_t v) {/' "$IMPL"
 fi
 cmake -B build -DGGML_RPC=ON -DLLAMA_CURL=OFF
-cmake --build build --config Release -j"${JOBS:-$(nproc)}" --target llama-bench llama-batched-bench llama-cli rpc-server
+cmake --build build --config Release -j"${JOBS:-$(nproc)}" --target llama-bench llama-batched-bench llama-cli ggml-rpc-server
 mkdir -p ~/models && cd ~/models
 # Llama 3.1 8B Instruct, 4-bit (about 4.9 GB). Swap for a 3B model on 6 GB phones.
 MODEL_URL=${MODEL_URL:-https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf}
